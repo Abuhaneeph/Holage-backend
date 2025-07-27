@@ -8,7 +8,10 @@ const pool = mysql.createPool({
   user: process.env.DB_USER || "root",
   password: process.env.DB_PASSWORD || "",
   database: process.env.DB_DATABASE || "holage_db",
-  port: process.env.DB_PORT || 3306, // Default MySQL port
+  port: process.env.DB_PORT || 3306,
+  ssl: {
+    rejectUnauthorized: false, // For development - in production, use proper SSL certificates
+  },
   waitForConnections: true,
   connectionLimit: 10,
   queueLimit: 0,
