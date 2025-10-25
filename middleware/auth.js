@@ -49,3 +49,6 @@ export const authorizeRoles = (...roles) => {
     next()
   }
 }
+
+// Alias for protect (for backward compatibility)
+export const authenticate = protect

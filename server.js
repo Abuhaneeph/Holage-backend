@@ -6,6 +6,8 @@ import { fileURLToPath } from "url" // Import fileURLToPath for __dirname equiva
 
 import authRoutes from "./routes/auth.js"
 import kycRoutes from "./routes/kyc.js"
+import walletRoutes from "./routes/wallet.js"
+import shippingRoutes from "./routes/shipping.js"
 import pool from "./config/db.js" // Import to ensure connection is established
 import http from "http"
 import https from "https"
@@ -26,6 +28,8 @@ app.use("/uploads", express.static(path.join(__dirname, "uploads"))) // Serve st
 // Routes
 app.use("/api/auth", authRoutes)
 app.use("/api/kyc", kycRoutes)
+app.use("/api/wallet", walletRoutes)
+app.use("/api/shipping", shippingRoutes)
 
 // Basic route for testing
 app.get("/", (req, res) => {
@@ -43,7 +47,7 @@ pool
     console.error("Error connecting to MySQL database:", err.message)
   })
 
-const PORT = process.env.PORT || 5000
+const PORT = process.env.PORT || 4000
 
 // Get the app URL from environment variables or construct it
 const APP_URL = process.env.APP_URL || `http://localhost:${PORT}`;

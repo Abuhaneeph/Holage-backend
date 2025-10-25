@@ -30,7 +30,6 @@ const upload = multer({
   { name: "driverLicense", maxCount: 1 },
   { name: "vehicleReg", maxCount: 1 },
   { name: "utilityBill", maxCount: 1 },
-  { name: "passportPhoto", maxCount: 1 },
 ])
 
 // Helper function to upload file to Cloudinary
@@ -77,7 +76,7 @@ export const submitKyc = (req, res) => {
     try {
       // Upload files to Cloudinary
       const uploadPromises = []
-      const fileFields = ['profilePhoto', 'driverLicense', 'vehicleReg', 'utilityBill', 'passportPhoto']
+      const fileFields = ['profilePhoto', 'driverLicense', 'vehicleReg', 'utilityBill']
       const uploadedFiles = {}
 
       for (const field of fileFields) {
@@ -102,31 +101,30 @@ export const submitKyc = (req, res) => {
       // Wait for all uploads to complete
       await Promise.all(uploadPromises)
 
+      // Fetch existing user data first to preserve documents not being updated
+      const user = await findUserById(userId)
+      
       const kycData = {
-        phone: phone || null,
-        address: address || null,
-        nin: nin || null,
-        profilePhoto: uploadedFiles.profilePhoto?.url || null,
-        profilePhotoPublicId: uploadedFiles.profilePhoto?.public_id || null,
-        driverLicense: uploadedFiles.driverLicense?.url || null,
-        driverLicensePublicId: uploadedFiles.driverLicense?.public_id || null,
-        vehicleReg: uploadedFiles.vehicleReg?.url || null,
-        vehicleRegPublicId: uploadedFiles.vehicleReg?.public_id || null,
-        utilityBill: uploadedFiles.utilityBill?.url || null,
-        utilityBillPublicId: uploadedFiles.utilityBill?.public_id || null,
-        passportPhoto: uploadedFiles.passportPhoto?.url || null,
-        passportPhotoPublicId: uploadedFiles.passportPhoto?.public_id || null,
-        kycStatus: "pending", // Set initial KYC status to pending
+        phone: phone || user.phone || null,
+        address: address || user.address || null,
+        nin: nin || user.nin || null,
+        // Only update document fields if new files are uploaded, otherwise keep existing
+        profilePhoto: uploadedFiles.profilePhoto?.url || user.profilePhoto || null,
+        profilePhotoPublicId: uploadedFiles.profilePhoto?.public_id || user.profilePhotoPublicId || null,
+        driverLicense: uploadedFiles.driverLicense?.url || user.driverLicense || null,
+        driverLicensePublicId: uploadedFiles.driverLicense?.public_id || user.driverLicensePublicId || null,
+        vehicleReg: uploadedFiles.vehicleReg?.url || user.vehicleReg || null,
+        vehicleRegPublicId: uploadedFiles.vehicleReg?.public_id || user.vehicleRegPublicId || null,
+        utilityBill: uploadedFiles.utilityBill?.url || user.utilityBill || null,
+        utilityBillPublicId: uploadedFiles.utilityBill?.public_id || user.utilityBillPublicId || null,
+        kycStatus: user.kycStatus || "pending", // Keep existing status or set to pending
       }
 
       // Add trucker-specific fields if role is trucker
-      const user = await findUserById(userId)
       if (user && user.role === "trucker") {
-        if (!plateNumber || !vehicleType) {
-          return res.status(400).json({ message: "Plate number and vehicle type are required for truckers." })
-        }
-        kycData.plateNumber = plateNumber || null
-        kycData.vehicleType = vehicleType || null
+        // For truckers, preserve existing values if not provided
+        kycData.plateNumber = plateNumber || user.plateNumber || null
+        kycData.vehicleType = vehicleType || user.vehicleType || null
       } else {
         // Ensure these fields are null for non-truckers
         kycData.plateNumber = null
@@ -174,6 +172,33 @@ export const getKycStatus = async (req, res) => {
   } catch (error) {
     console.error("Error fetching KYC status:", error)
     res.status(500).json({ message: "Server error fetching KYC status." })
+  }
+}
+
+export const getKycDocuments = async (req, res) => {
+  const userId = req.user.id
+  try {
+    const user = await findUserById(userId)
+    if (!user) return res.status(404).json({ message: "User not found" })
+    
+    const documents = {
+      profilePhoto: user.profilePhoto || null,
+      utilityBill: user.utilityBill || null,
+      driverLicense: user.driverLicense || null,
+      vehicleReg: user.vehicleReg || null,
+      kycStatus: user.kycStatus || "pending",
+      phone: user.phone || null,
+      address: user.address || null,
+      nin: user.nin || null,
+      plateNumber: user.plateNumber || null,
+      vehicleType: user.vehicleType || null,
+      role: user.role
+    }
+    
+    res.status(200).json({ success: true, documents })
+  } catch (error) {
+    console.error("Error fetching KYC documents:", error)
+    res.status(500).json({ message: "Server error fetching KYC documents." })
   }
 }
 

@@ -1,6 +1,7 @@
 import bcrypt from "bcryptjs"
 import jwt from "jsonwebtoken"
 import randomstring from "randomstring"
+import pool from "../config/db.js"
 import {
   createUser,
   findUserByEmail,
@@ -61,16 +62,32 @@ export const login = async (req, res) => {
   try {
     const user = await findUserByEmail(email)
     if (!user) {
-      return res.status(401).json({ message: "Invalid credentials." })
+      return res.status(404).json({ message: "User does not exist. Please sign up first." })
     }
 
     const isMatch = await bcrypt.compare(password, user.password)
     if (!isMatch) {
-      return res.status(401).json({ message: "Invalid credentials." })
+      return res.status(401).json({ message: "Incorrect password. Please try again." })
     }
 
     if (!user.isVerified) {
-      return res.status(403).json({ message: "Please verify your email to log in." })
+      // Generate new verification code and resend
+      const verificationCode = Math.floor(100000 + Math.random() * 900000).toString()
+      
+      // Update the user's verification code
+      await pool.execute(
+        "UPDATE users SET verificationToken = ? WHERE email = ?",
+        [verificationCode, email]
+      )
+      
+      // Send the new verification code
+      await sendVerificationEmail(email, verificationCode)
+      
+      return res.status(403).json({ 
+        message: "Please verify your email to log in. A new verification code has been sent to your email.",
+        requiresVerification: true,
+        email: user.email
+      })
     }
 
     const token = jwt.sign({ id: user.id, role: user.role }, JWT_SECRET, { expiresIn: "1h" })
@@ -239,5 +256,42 @@ export const resetPassword = async (req, res) => {
   } catch (error) {
     console.error("Reset password error:", error)
     res.status(500).json({ message: "Server error during password reset." })
+  }
+}
+
+export const resendVerificationCode = async (req, res) => {
+  const { email } = req.body
+
+  if (!email) {
+    return res.status(400).json({ message: "Email is required." })
+  }
+
+  try {
+    const user = await findUserByEmail(email)
+    if (!user) {
+      return res.status(404).json({ message: "User not found." })
+    }
+
+    if (user.isVerified) {
+      return res.status(400).json({ message: "Email is already verified." })
+    }
+
+    // Generate new 6-digit verification code
+    const verificationCode = Math.floor(100000 + Math.random() * 900000).toString()
+    const codeExpiration = new Date(Date.now() + 10 * 60 * 1000) // 10 minutes
+
+    // Update the user's verification code
+    await pool.execute(
+      "UPDATE users SET verificationToken = ? WHERE email = ?",
+      [verificationCode, email]
+    )
+
+    // Send the new verification code via email
+    await sendVerificationEmail(email, verificationCode)
+
+    res.status(200).json({ message: "Verification code resent successfully." })
+  } catch (error) {
+    console.error("Resend verification error:", error)
+    res.status(500).json({ message: "Server error while resending verification code." })
   }
 }

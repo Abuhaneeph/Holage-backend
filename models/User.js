@@ -81,7 +81,6 @@ export const updateKycInfo = async (userId, kycData) => {
     plateNumber,
     vehicleType,
     utilityBill,
-    passportPhoto,
     kycStatus,
   } = kycData
 
@@ -96,22 +95,111 @@ export const updateKycInfo = async (userId, kycData) => {
       plateNumber = ?,
       vehicleType = ?,
       utilityBill = ?,
-      passportPhoto = ?,
       kycStatus = ?
     WHERE id = ?
   `
   await pool.execute(query, [
-    phone,
-    address,
-    nin,
-    profilePhoto,
-    driverLicense,
-    vehicleReg,
-    plateNumber,
-    vehicleType,
-    utilityBill,
-    passportPhoto,
-    kycStatus,
+    phone || null,
+    address || null,
+    nin || null,
+    profilePhoto || null,
+    driverLicense || null,
+    vehicleReg || null,
+    plateNumber || null,
+    vehicleType || null,
+    utilityBill || null,
+    kycStatus || null,
     userId,
   ])
+}
+
+// Wallet-related functions
+
+export const updateUserWallet = async (userId, walletData) => {
+  const {
+    paystackCustomerCode,
+    paystackCustomerId,
+    walletAccountNumber,
+    walletAccountName,
+    walletBankName,
+    walletBankSlug,
+    walletBankId,
+    walletActive,
+    walletCurrency,
+    dedicatedAccountId,
+  } = walletData
+
+  const query = `
+    UPDATE users SET
+      paystackCustomerCode = ?,
+      paystackCustomerId = ?,
+      walletAccountNumber = ?,
+      walletAccountName = ?,
+      walletBankName = ?,
+      walletBankSlug = ?,
+      walletBankId = ?,
+      walletActive = ?,
+      walletCurrency = ?,
+      dedicatedAccountId = ?
+    WHERE id = ?
+  `
+  await pool.execute(query, [
+    paystackCustomerCode,
+    paystackCustomerId,
+    walletAccountNumber,
+    walletAccountName,
+    walletBankName,
+    walletBankSlug,
+    walletBankId,
+    walletActive,
+    walletCurrency,
+    dedicatedAccountId,
+    userId,
+  ])
+}
+
+export const createWalletTransaction = async (userId, transactionData) => {
+  const { reference, amount, currency, type, status, description, paystackReference, metadata } =
+    transactionData
+
+  const query = `
+    INSERT INTO wallet_transactions 
+    (userId, reference, amount, currency, type, status, description, paystackReference, metadata, createdAt)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+  `
+  const [result] = await pool.execute(query, [
+    userId,
+    reference,
+    amount,
+    currency,
+    type,
+    status,
+    description,
+    paystackReference,
+    metadata,
+  ])
+  return result.insertId
+}
+
+export const getWalletTransactions = async (userId, limit = 20, offset = 0) => {
+  const query = `
+    SELECT * FROM wallet_transactions 
+    WHERE userId = ? 
+    ORDER BY createdAt DESC 
+    LIMIT ? OFFSET ?
+  `
+  const [rows] = await pool.execute(query, [userId, limit, offset])
+  return rows
+}
+
+export const getWalletBalance = async (userId) => {
+  const query = `
+    SELECT 
+      COALESCE(SUM(CASE WHEN type = 'credit' AND status = 'success' THEN amount ELSE 0 END), 0) -
+      COALESCE(SUM(CASE WHEN type = 'debit' AND status = 'success' THEN amount ELSE 0 END), 0) AS balance
+    FROM wallet_transactions
+    WHERE userId = ?
+  `
+  const [rows] = await pool.execute(query, [userId])
+  return rows[0]?.balance || 0
 }
