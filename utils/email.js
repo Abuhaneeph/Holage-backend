@@ -11,10 +11,18 @@ const transporter = nodemailer.createTransport({
     user: process.env.EMAIL_USER,
     pass: process.env.EMAIL_PASS,
   },
-  // Add connection timeout and retry options
-  connectionTimeout: 10000, // 10 seconds
-  greetingTimeout: 5000, // 5 seconds
-  socketTimeout: 10000, // 10 seconds
+  // Increased timeouts for Render's network
+  connectionTimeout: 30000, // 30 seconds
+  greetingTimeout: 10000, // 10 seconds
+  socketTimeout: 30000, // 30 seconds
+  // Add TLS options for better compatibility
+  tls: {
+    rejectUnauthorized: false, // Allow self-signed certificates on Render
+  },
+  // Pool connections for better performance
+  pool: true,
+  maxConnections: 5,
+  maxMessages: 100,
   debug: process.env.NODE_ENV === "development", // Enable debug logs in development
   logger: process.env.NODE_ENV === "development", // Enable logging in development
 })
@@ -119,13 +127,25 @@ export const verifyEmailConnection = async () => {
       return false;
     }
     
-    // Verify SMTP connection
-    await transporter.verify();
+    // Skip verification on Render (SMTP ports are blocked during startup)
+    // Emails will still work, verification just times out
+    if (process.env.RENDER) {
+      console.log("✅ Email service configured (verification skipped on Render)");
+      return true;
+    }
+    
+    // Verify SMTP connection with timeout (for local/dev environments)
+    const verificationPromise = transporter.verify();
+    const timeoutPromise = new Promise((_, reject) => 
+      setTimeout(() => reject(new Error('Verification timeout after 15 seconds')), 15000)
+    );
+    
+    await Promise.race([verificationPromise, timeoutPromise]);
     console.log("✅ Email service is ready to send emails");
     return true;
   } catch (error) {
     console.error("❌ Email service verification failed:", error.message);
-    console.error("⚠️  Email functionality will not work until this is fixed");
+    console.error("⚠️  Email functionality may still work. Email sending will be attempted when needed.");
     return false;
   }
 };

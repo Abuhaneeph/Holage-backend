@@ -55,11 +55,13 @@ const APP_URL = process.env.APP_URL || `http://localhost:${PORT}`;
 
 
 // Start the server
-app.listen(PORT, async () => {
+app.listen(PORT, () => {
   console.log(`🚀 Server is running on port ${PORT}`);
   
-  // Verify email connection on startup
-  await verifyEmailConnection();
+  // Verify email connection on startup (non-blocking)
+  verifyEmailConnection().catch(err => {
+    console.error("Email verification failed:", err.message);
+  });
   
   // Set up a ping mechanism to prevent sleep mode
   setInterval(() => {
@@ -69,5 +71,5 @@ app.listen(PORT, async () => {
     }).on('error', (err) => {
       console.error('Ping failed:', err);
     });
-  }, 0.1 * 60 * 1000);
+  }, 13 * 60 * 1000);
 });
