@@ -168,16 +168,25 @@ export const forgotPassword = async (req, res) => {
     const resetCode = randomstring.generate({ length: 6, charset: "numeric" })
     const resetExpires = new Date(Date.now() + 15 * 60 * 1000) // 15 minutes
 
+    console.log(`📧 Attempting to send password reset email to: ${email}`)
+    
     // Store the code and its expiration (implement this function in your DB layer)
     await updatePasswordResetToken(email, resetCode, resetExpires)
 
     // Send the code via email (update the function accordingly)
     await sendPasswordResetEmail(email, resetCode)
 
+    console.log(`✅ Password reset email sent successfully to: ${email}`)
+    
     return res.status(200).json({ message: "Password reset code sent to your email." })
   } catch (error) {
-    console.error("Forgot password error:", error)
-    return res.status(500).json({ message: "Server error during password reset request." })
+    console.error("❌ Forgot password error:", error)
+    console.error("Error details:", error.message)
+    console.error("Stack trace:", error.stack)
+    return res.status(500).json({ 
+      message: "Server error during password reset request.",
+      error: process.env.NODE_ENV === "development" ? error.message : undefined
+    })
   }
 }
 
