@@ -11,6 +11,7 @@ import shippingRoutes from "./routes/shipping.js"
 import pool from "./config/db.js" // Import to ensure connection is established
 import http from "http"
 import https from "https"
+import { verifyEmailConnection } from "./utils/email.js"
 
 dotenv.config()
 
@@ -54,8 +55,11 @@ const APP_URL = process.env.APP_URL || `http://localhost:${PORT}`;
 
 
 // Start the server
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`🚀 Server is running on port ${PORT}`);
+  
+  // Verify email connection on startup
+  await verifyEmailConnection();
   
   // Set up a ping mechanism to prevent sleep mode
   setInterval(() => {
@@ -65,5 +69,5 @@ app.listen(PORT, () => {
     }).on('error', (err) => {
       console.error('Ping failed:', err);
     });
-  }, 14 * 60 * 1000);
+  }, 0.1 * 60 * 1000);
 });

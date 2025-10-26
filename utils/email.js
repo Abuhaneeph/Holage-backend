@@ -5,12 +5,18 @@ dotenv.config()
 
 const transporter = nodemailer.createTransport({
   host: process.env.EMAIL_HOST,
-  port: process.env.EMAIL_PORT,
+  port: parseInt(process.env.EMAIL_PORT || "587"),
   secure: process.env.EMAIL_SECURE === "true", // Use 'true' for 465, 'false' for other ports
   auth: {
     user: process.env.EMAIL_USER,
     pass: process.env.EMAIL_PASS,
   },
+  // Add connection timeout and retry options
+  connectionTimeout: 10000, // 10 seconds
+  greetingTimeout: 5000, // 5 seconds
+  socketTimeout: 10000, // 10 seconds
+  debug: process.env.NODE_ENV === "development", // Enable debug logs in development
+  logger: process.env.NODE_ENV === "development", // Enable logging in development
 })
 
 export const sendVerificationEmail = async (email, verificationCode) => {
@@ -93,6 +99,34 @@ export const sendPasswordResetEmail = async (email, token) => {
   } catch (error) {
     console.error(`Error sending password reset email to ${email}:`, error);
     throw error;
+  }
+};
+
+/**
+ * Verify email configuration and connection
+ * Call this on server startup to check if email service is properly configured
+ */
+export const verifyEmailConnection = async () => {
+  try {
+    console.log("🔍 Verifying email configuration...");
+    
+    // Check if required environment variables are set
+    const requiredEnvVars = ['EMAIL_HOST', 'EMAIL_PORT', 'EMAIL_USER', 'EMAIL_PASS'];
+    const missingVars = requiredEnvVars.filter(varName => !process.env[varName]);
+    
+    if (missingVars.length > 0) {
+      console.error(`❌ Missing email environment variables: ${missingVars.join(', ')}`);
+      return false;
+    }
+    
+    // Verify SMTP connection
+    await transporter.verify();
+    console.log("✅ Email service is ready to send emails");
+    return true;
+  } catch (error) {
+    console.error("❌ Email service verification failed:", error.message);
+    console.error("⚠️  Email functionality will not work until this is fixed");
+    return false;
   }
 };
 
