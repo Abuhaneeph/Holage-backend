@@ -2,11 +2,11 @@ import pool from "../config/db.js"
 import bcrypt from "bcryptjs"
 
 // Updated createUser to include verificationToken and expiration
-export const createUser = async (fullName, email, password, role, verificationToken, codeExpiration) => {
+export const createUser = async (fullName, email, password, role, verificationToken, codeExpiration, nin, bvn) => {
   const hashedPassword = await bcrypt.hash(password, 10)
   const [result] = await pool.execute(
-    "INSERT INTO users (fullName, email, password, role, verificationToken) VALUES (?, ?, ?, ?, ?)",
-    [fullName, email, hashedPassword, role, verificationToken],
+    "INSERT INTO users (fullName, email, password, role, verificationToken, nin, bvn) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    [fullName, email, hashedPassword, role, verificationToken, nin, bvn],
   )
   return result.insertId
 }
@@ -182,13 +182,15 @@ export const createWalletTransaction = async (userId, transactionData) => {
 }
 
 export const getWalletTransactions = async (userId, limit = 20, offset = 0) => {
+  const limitNum = Math.max(1, parseInt(limit, 10) || 20)
+  const offsetNum = Math.max(0, parseInt(offset, 10) || 0)
   const query = `
     SELECT * FROM wallet_transactions 
     WHERE userId = ? 
     ORDER BY createdAt DESC 
-    LIMIT ? OFFSET ?
+    LIMIT ${limitNum} OFFSET ${offsetNum}
   `
-  const [rows] = await pool.execute(query, [userId, limit, offset])
+  const [rows] = await pool.execute(query, [userId])
   return rows
 }
 

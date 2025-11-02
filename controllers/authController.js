@@ -14,16 +14,21 @@ import {
 } from "../models/User.js"
 import { sendVerificationEmail, sendPasswordResetEmail } from "../utils/email.js"
 import dotenv from "dotenv"
+import { createKorapayWalletForUser } from "./walletController.js"
 
 dotenv.config()
 
 const JWT_SECRET = process.env.JWT_SECRET
 
 export const register = async (req, res) => {
-  const { fullName, email, password, role } = req.body
+  const { fullName, email, password, role, nin, bvn } = req.body
 
-  if (!fullName || !email || !password || !role) {
-    return res.status(400).json({ message: "All fields are required." })
+  if (!fullName || !email || !password || !role || !nin || !bvn) {
+    return res.status(400).json({ message: "Full name, email, password, role, NIN and BVN are required." })
+  }
+  // Basic validation for NIN/BVN length (Nigeria standard is 11 digits)
+  if (!/^\d{11}$/.test(String(nin)) || !/^\d{11}$/.test(String(bvn))) {
+    return res.status(400).json({ message: "NIN and BVN must be 11 digits." })
   }
 
   try {
@@ -38,13 +43,20 @@ export const register = async (req, res) => {
     // Set expiration time (e.g., 10 minutes from now)
     const codeExpiration = new Date(Date.now() + 10 * 60 * 1000) // 10 minutes
 
-    const userId = await createUser(fullName, email, password, role, verificationCode, codeExpiration)
+    const userId = await createUser(fullName, email, password, role, verificationCode, codeExpiration, String(nin), String(bvn))
 
     await sendVerificationEmail(email, verificationCode)
 
-    res.status(201).json({ 
-      message: "Registration successful. Please check your email for the 6-digit verification code.", 
-      userId 
+    // Attempt KoraPay wallet creation (silent skip if BVN missing)
+    try {
+      await createKorapayWalletForUser(userId)
+    } catch (e) {
+      console.log("KoraPay wallet creation deferred:", e.message)
+    }
+
+    res.status(201).json({
+      message: "Registration successful. Please check your email for the 6-digit verification code.",
+      userId
     })
   } catch (error) {
     console.error("Registration error:", error)

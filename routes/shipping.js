@@ -1,5 +1,16 @@
 import express from 'express';
 import { calculateStateDistance, estimateShippingCost } from '../utils/distanceCalculator.js';
+import {
+  createNewShipment,
+  getMyShipments,
+  getAvailableShipmentsForTruckers,
+  getMyAssignedShipments,
+  getShipmentDetails,
+  acceptShipment,
+  updateShipment,
+  deleteShipmentById
+} from '../controllers/shipmentController.js';
+import { protect } from '../middleware/auth.js';
 
 const router = express.Router();
 
@@ -73,6 +84,66 @@ router.post('/estimate-cost', async (req, res) => {
     });
   }
 });
+
+// ========================================
+// SHIPMENT MANAGEMENT ENDPOINTS
+// ========================================
+
+/**
+ * @route   POST /api/shipping/shipments
+ * @desc    Create a new shipment (Shipper only)
+ * @access  Private
+ */
+router.post('/shipments', protect, createNewShipment);
+
+/**
+ * @route   GET /api/shipping/shipments/my-shipments
+ * @desc    Get all shipments for logged-in shipper
+ * @access  Private (Shipper only)
+ */
+router.get('/shipments/my-shipments', protect, getMyShipments);
+
+/**
+ * @route   GET /api/shipping/shipments/available
+ * @desc    Get all available shipments for truckers
+ * @access  Private (Trucker only)
+ */
+router.get('/shipments/available', protect, getAvailableShipmentsForTruckers);
+
+/**
+ * @route   GET /api/shipping/shipments/my-jobs
+ * @desc    Get all shipments assigned to logged-in trucker
+ * @access  Private (Trucker only)
+ */
+router.get('/shipments/my-jobs', protect, getMyAssignedShipments);
+
+/**
+ * @route   GET /api/shipping/shipments/:shipmentId
+ * @desc    Get a single shipment by ID
+ * @access  Private
+ */
+router.get('/shipments/:shipmentId', protect, getShipmentDetails);
+
+/**
+ * @route   POST /api/shipping/shipments/:shipmentId/accept
+ * @desc    Accept a shipment (Trucker only)
+ * @access  Private (Trucker only)
+ */
+router.post('/shipments/:shipmentId/accept', protect, acceptShipment);
+
+/**
+ * @route   PATCH /api/shipping/shipments/:shipmentId
+ * @desc    Update shipment status
+ * @access  Private
+ */
+router.patch('/shipments/:shipmentId', protect, updateShipment);
+
+/**
+ * @route   DELETE /api/shipping/shipments/:shipmentId
+ * @desc    Delete a shipment (only if pending)
+ * @access  Private (Shipper only)
+ */
+router.delete('/shipments/:shipmentId', protect, deleteShipmentById);
 
 export default router;
 

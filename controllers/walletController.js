@@ -11,6 +11,86 @@ import {
 
 dotenv.config()
 
+// KoraPay config
+const KORAPAY_BASE_URL = process.env.KORAPAY_BASE_URL || "https://api.korapay.com/merchant/api/v1"
+const KORAPAY_SECRET_KEY = process.env.KORAPAY_SECRET_KEY
+
+const korapayRequest = async (method, endpoint, data = null, params = null) => {
+  try {
+    const config = {
+      method,
+      url: `${KORAPAY_BASE_URL}${endpoint}`,
+      headers: {
+        Authorization: `Bearer ${KORAPAY_SECRET_KEY}`,
+        "Content-Type": "application/json",
+      },
+      ...(params ? { params } : {}),
+    }
+
+    if (data) {
+      config.data = data
+    }
+
+    const response = await axios(config)
+    return response.data
+  } catch (error) {
+    const status = error.response?.status
+    const body = error.response?.data
+    console.error("❌ KoraPay API Error:")
+    console.error("Status:", status)
+    console.error("Response:", JSON.stringify(body, null, 2))
+    throw new Error(body?.message || "KoraPay API request failed")
+  }
+}
+
+/**
+ * Helper: Create KoraPay VBA for a user and persist to DB
+ */
+export const createKorapayWalletForUser = async (userId) => {
+  const user = await findUserById(userId)
+  if (!user) throw new Error("User not found")
+
+  // Require BVN (Korapay requirement). If missing, skip gracefully.
+  if (!user.bvn) {
+    return { skipped: true, reason: "BVN missing" }
+  }
+
+  const account_reference = `holage-${userId}-${Date.now()}`
+  const body = {
+    account_name: user.fullName,
+    account_reference: `${account_reference}-${userId}`,
+    permanent: true,
+    bank_code: "000",
+    customer: {
+      name: user.fullName,
+      email: user.email || undefined,
+    },
+    kyc: {
+      bvn: String(user.bvn),
+      ...(user.nin ? { nin: String(user.nin) } : {}),
+    },
+  }
+
+  const resp = await korapayRequest("POST", "/virtual-bank-account", body)
+  const acc = resp?.data || resp?.data?.data || resp
+
+  // Persist to users table using existing wallet fields
+  await updateUserWallet(userId, {
+    paystackCustomerCode: null,
+    paystackCustomerId: null,
+    walletAccountNumber: acc?.account_number,
+    walletAccountName: acc?.account_name || user.fullName,
+    walletBankName: acc?.bank_name || "KoraPay",
+    walletBankSlug: (acc?.bank_name || "korapay").toLowerCase().replace(/\s+/g, "-"),
+    walletBankId: null,
+    walletActive: acc?.account_status === "active" || true,
+    walletCurrency: acc?.currency || "NGN",
+    dedicatedAccountId: acc?.unique_id || null,
+  })
+
+  return { created: true, account: acc }
+}
+
 const FLUTTERWAVE_CLIENT_ID = process.env.FLUTTERWAVE_PUBLIC_KEY // Client ID
 const FLUTTERWAVE_CLIENT_SECRET = process.env.FLUTTERWAVE_SECRET_KEY // Client Secret
 const FLUTTERWAVE_BASE_URL = process.env.FLUTTERWAVE_BASE_URL || "https://developersandbox-api.flutterwave.com"
@@ -126,232 +206,7 @@ const flutterwaveRequest = async (method, endpoint, data = null) => {
   }
 }
 
-/**
- * Create a Virtual Account for a user using Flutterwave
- */
-export const createWallet = async (req, res) => {
-  const userId = req.user.id
-  const { currency = "NGN", account_type = "dynamic", amount = 1, expiry = 86400 } = req.body // Default: 24 hours
-
-  try {
-    // Get user details
-    const user = await findUserById(userId)
-    if (!user) {
-      return res.status(404).json({ message: "User not found" })
-    }
-
-    // Check if user already has an active wallet
-    if (user.walletAccountNumber && user.walletActive) {
-      // Check if the existing wallet is expired
-      if (user.dedicatedAccountId) {
-        try {
-          console.log(`🔍 Checking if existing wallet is expired: ${user.dedicatedAccountId}`)
-          const existingWalletResponse = await flutterwaveRequest("GET", `/virtual-accounts/${user.dedicatedAccountId}`)
-          
-          if (existingWalletResponse.status === "success") {
-            const existingWallet = existingWalletResponse.data
-            const expirationDate = new Date(existingWallet.account_expiration_datetime)
-            const now = new Date()
-            
-            if (expirationDate > now) {
-              // Wallet is still active
-              return res.status(400).json({
-                message: "Active wallet already exists for this user",
-                wallet: {
-                  id: existingWallet.id,
-                  accountNumber: existingWallet.account_number,
-                  accountName: existingWallet.account_name,
-                  bankName: existingWallet.account_bank_name,
-                  currency: existingWallet.currency,
-                  status: existingWallet.status,
-                  expirationDatetime: existingWallet.account_expiration_datetime,
-                },
-              })
-            } else {
-              // Wallet is expired, allow creation of new one
-              console.log(`⚠️ Existing wallet is expired, allowing creation of new wallet`)
-            }
-          }
-        } catch (error) {
-          console.log(`⚠️ Could not check existing wallet status: ${error.message}`)
-          // If we can't check the status, assume it's expired and allow creation
-        }
-      } else {
-        // No dedicatedAccountId, assume wallet is inactive/expired
-        console.log(`⚠️ Existing wallet has no dedicatedAccountId, allowing creation of new wallet`)
-      }
-    }
-
-    // Check if KYC is approved (optional but recommended)
-    if (user.kycStatus !== "approved") {
-      return res.status(403).json({
-        message: "KYC verification required. Please complete KYC verification before creating a wallet.",
-        kycStatus: user.kycStatus,
-      })
-    }
-
-    // Step 1: Check if customer exists in Flutterwave or create one
-    let flutterwaveCustomerId = user.paystackCustomerCode // Reusing this field for Flutterwave customer_id
-
-    if (!flutterwaveCustomerId) {
-      console.log("🔍 Checking if customer exists in Flutterwave...")
-      
-      // Search for existing customer by email
-      try {
-        const searchResponse = await flutterwaveRequest("GET", `/customers?email=${encodeURIComponent(user.email)}`)
-        
-        console.log("📥 Customer search response:", JSON.stringify(searchResponse, null, 2))
-
-        if (searchResponse.status === "success" && searchResponse.data?.length > 0) {
-          // Customer exists
-          flutterwaveCustomerId = searchResponse.data[0].id
-          console.log(`✅ Customer found: ${flutterwaveCustomerId}`)
-          
-          // Save customer_id to database
-          await pool.execute(
-            "UPDATE users SET paystackCustomerCode = ? WHERE id = ?",
-            [flutterwaveCustomerId, userId]
-          )
-        } else {
-          console.log("ℹ️ No existing customer found, will create new one")
-        }
-      } catch (searchError) {
-        console.log("⚠️ Customer search failed, will create new customer:", searchError.message)
-      }
-    }
-
-    // If customer doesn't exist, create one
-    if (!flutterwaveCustomerId) {
-      console.log("📝 Creating new customer in Flutterwave...")
-      
-      const customerData = {
-        email: user.email,
-        full_name: user.fullName,
-        phone: user.phone || undefined,
-      }
-
-      console.log("📤 Customer data being sent:", JSON.stringify(customerData, null, 2))
-
-      try {
-        const customerResponse = await flutterwaveRequest("POST", "/customers", customerData)
-        
-        console.log("📥 Customer creation response:", JSON.stringify(customerResponse, null, 2))
-
-        if (customerResponse.status === "success") {
-          flutterwaveCustomerId = customerResponse.data.id
-          console.log(`✅ Customer created: ${flutterwaveCustomerId}`)
-          
-          // Save customer_id to database
-          await pool.execute(
-            "UPDATE users SET paystackCustomerCode = ? WHERE id = ?",
-            [flutterwaveCustomerId, userId]
-          )
-        } else {
-          console.error("❌ Customer creation failed - invalid response:", customerResponse)
-          throw new Error(`Failed to create customer in Flutterwave: ${customerResponse.message || 'Unknown error'}`)
-        }
-      } catch (createError) {
-        console.error("❌ Customer creation failed:", createError.message)
-        return res.status(500).json({
-          message: "Failed to create customer in Flutterwave",
-          error: createError.message
-        })
-      }
-    }
-
-    // Step 2: Create virtual account with customer_id
-    console.log("💳 Creating virtual account...")
-    
-    // Generate unique reference for this transaction (alphanumeric only, no special characters)
-    const reference = `HOLAGEWALLET${userId}${Date.now()}`
-
-    // Prepare request data for Flutterwave virtual account
-    const requestData = {
-      reference: reference,
-      customer_id: flutterwaveCustomerId, // Use Flutterwave customer_id
-      amount: amount, // 0 for static accounts
-      expiry: expiry, // Expiry time in seconds (default: 360 seconds = 6 minutes)
-      currency: currency,
-      account_type: account_type,
-      narration: `${user.fullName} - Holage Wallet`, // Narration at root level
-    }
-
-    // Add BVN if available (must be exactly 11 digits)
-    if (user.bvn && currency === "NGN") {
-      const bvnClean = user.bvn.replace(/\D/g, '') // Remove non-digits
-      if (bvnClean.length === 11) {
-        requestData.bvn = bvnClean // BVN at root level, not in meta
-      }
-    }
-
-    // Add NIN if available (must be exactly 11 digits)
-    if (user.nin && currency === "NGN") {
-      const ninClean = user.nin.replace(/\D/g, '') // Remove non-digits
-      if (ninClean.length === 11) {
-        requestData.nin = ninClean // NIN at root level, not in meta
-      }
-    }
-    
-    // Add phone if available
-    if (user.phone) {
-      requestData.phone = user.phone
-    }
-
-    // Log request data for debugging
-    console.log("📤 Sending to Flutterwave:")
-    console.log(JSON.stringify(requestData, null, 2))
-    
-    // Create virtual account
-    const flutterwaveResponse = await flutterwaveRequest("POST", "/virtual-accounts", requestData)
-
-    if (flutterwaveResponse.status === "success") {
-      // Extract wallet details from Flutterwave response
-      const walletData = flutterwaveResponse.data
-
-      // Save wallet information to database
-      await updateUserWallet(userId, {
-        paystackCustomerCode: flutterwaveCustomerId, // Store Flutterwave customer_id
-        paystackCustomerId: null,
-        walletAccountNumber: walletData.account_number,
-        walletAccountName: user.fullName,
-        walletBankName: walletData.account_bank_name,
-        walletBankSlug: walletData.account_bank_name?.toLowerCase().replace(/\s+/g, "-"),
-        walletBankId: null,
-        walletActive: walletData.status === "active",
-        walletCurrency: walletData.currency || currency,
-        dedicatedAccountId: walletData.id,
-      })
-
-      return res.status(201).json({
-        message: "Wallet created successfully",
-        wallet: {
-          id: walletData.id,
-          accountNumber: walletData.account_number,
-          accountName: user.fullName,
-          bankName: walletData.account_bank_name,
-          currency: walletData.currency,
-          accountType: walletData.account_type,
-          status: walletData.status,
-          reference: walletData.reference,
-          customerId: walletData.customer_id,
-          expirationDatetime: walletData.account_expiration_datetime,
-          createdDatetime: walletData.created_datetime,
-        },
-      })
-    } else {
-      return res.status(400).json({
-        message: "Failed to create wallet",
-        error: flutterwaveResponse.message,
-      })
-    }
-  } catch (error) {
-    console.error("Create wallet error:", error)
-    return res.status(500).json({
-      message: "Server error during wallet creation",
-      error: error.message,
-    })
-  }
-}
+// Removed Flutterwave-specific wallet creation and helpers
 
 /**
  * Get user's wallet details
@@ -394,28 +249,7 @@ export const getWallet = async (req, res) => {
 /**
  * Fetch available currencies for virtual accounts
  */
-export const getAvailableBanks = async (req, res) => {
-  try {
-    // Flutterwave supports NGN, GHS, KES, EGP for virtual accounts
-    const supportedCurrencies = [
-      { currency: "NGN", country: "Nigeria", banks: ["Wema Bank"] },
-      { currency: "GHS", country: "Ghana", banks: ["Available Banks"] },
-      { currency: "KES", country: "Kenya", banks: ["Available Banks"] },
-      { currency: "EGP", country: "Egypt", banks: ["Available Banks"] },
-    ]
-
-    return res.status(200).json({
-      message: "Supported currencies fetched successfully",
-      currencies: supportedCurrencies,
-    })
-  } catch (error) {
-    console.error("Get available banks error:", error)
-    return res.status(500).json({
-      message: "Server error fetching available currencies",
-      error: error.message,
-    })
-  }
-}
+// Removed Flutterwave available banks
 
 /**
  * Get wallet transaction history
@@ -434,15 +268,18 @@ export const getTransactionHistory = async (req, res) => {
       return res.status(404).json({ message: "No wallet found for this user" })
     }
 
-    const offset = (page - 1) * limit
-    const transactions = await getWalletTransactions(userId, parseInt(limit), parseInt(offset))
+    const pageNum = Number(page) || 1
+    const limitNum = Number(limit) || 20
+    const offsetNum = Math.max(0, (pageNum - 1) * limitNum)
+
+    const transactions = await getWalletTransactions(userId, limitNum, offsetNum)
 
     return res.status(200).json({
       message: "Transaction history fetched successfully",
       transactions,
       pagination: {
-        page: parseInt(page),
-        limit: parseInt(limit),
+        page: pageNum,
+        limit: limitNum,
       },
     })
   } catch (error) {
@@ -458,292 +295,319 @@ export const getTransactionHistory = async (req, res) => {
  * Webhook handler for Flutterwave events
  * This endpoint receives notifications when funds are transferred to the virtual account
  */
-export const flutterwaveWebhook = async (req, res) => {
-  const secretHash = process.env.FLUTTERWAVE_SECRET_HASH
-  const signature = req.headers["verif-hash"]
-
-  // Verify webhook signature
-  if (!signature || signature !== secretHash) {
-    return res.status(401).json({ message: "Invalid signature" })
-  }
-
-  const event = req.body
-
-  try {
-    // Handle charge completed event
-    if (event.event === "charge.completed" || event.event === "transfer") {
-      const { customer, amount, currency, tx_ref, status } = event.data
-
-      // Only process successful transactions
-      if (status === "successful") {
-        // Find user by customer ID or reference
-        const customerId = customer?.id || event.data.customer_id
-
-        if (customerId) {
-          const [users] = await pool.execute("SELECT id FROM users WHERE id = ?", [customerId])
-
-          if (users.length > 0) {
-            const userId = users[0].id
-
-            // Record the transaction
-            await createWalletTransaction(userId, {
-              reference: tx_ref,
-              amount: amount,
-              currency: currency,
-              type: "credit",
-              status: "success",
-              description: `Wallet funding via bank transfer`,
-              paystackReference: tx_ref,
-              metadata: JSON.stringify(event.data),
-            })
-
-            console.log(`Wallet credited for user ${userId}: ${amount} ${currency}`)
-          }
-        }
-      }
-    }
-
-    res.status(200).json({ message: "Webhook received" })
-  } catch (error) {
-    console.error("Webhook processing error:", error)
-    res.status(500).json({ message: "Webhook processing failed" })
-  }
-}
+// Removed Flutterwave webhook
 
 /**
  * Get all virtual accounts for a user (if multiple accounts exist)
  */
-export const getUserVirtualAccounts = async (req, res) => {
-  const userId = req.user.id
+// Removed Flutterwave list virtual accounts
 
-  try {
-    const user = await findUserById(userId)
-    if (!user) {
-      return res.status(404).json({ message: "User not found" })
-    }
-
-    // Call Flutterwave API to get all virtual accounts for this user
-    const flutterwaveResponse = await flutterwaveRequest(
-      "GET",
-      `/virtual-accounts?customer_id=${userId}`
-    )
-
-    if (flutterwaveResponse.status === "success") {
-      return res.status(200).json({
-        message: "Virtual accounts fetched successfully",
-        accounts: flutterwaveResponse.data,
-      })
-    } else {
-      return res.status(400).json({
-        message: "Failed to fetch virtual accounts",
-        error: flutterwaveResponse.message,
-      })
-    }
-  } catch (error) {
-    console.error("Get virtual accounts error:", error)
-    return res.status(500).json({
-      message: "Server error fetching virtual accounts",
-      error: error.message,
-    })
-  }
-}
-
-export const getVirtualAccountById = async (req, res) => {
-  const { virtualAccountId } = req.params
-
-  try {
-    console.log(`🔍 Retrieving virtual account: ${virtualAccountId}`)
-
-    // Call Flutterwave API to get virtual account details
-    const flutterwaveResponse = await flutterwaveRequest("GET", `/virtual-accounts/${virtualAccountId}`)
-
-    if (flutterwaveResponse.status === "success") {
-      const virtualAccount = flutterwaveResponse.data
-
-      return res.json({
-        message: "Virtual account retrieved successfully",
-        virtualAccount: {
-          id: virtualAccount.id,
-          accountNumber: virtualAccount.account_number,
-          accountName: virtualAccount.account_name,
-          bankName: virtualAccount.account_bank_name,
-          currency: virtualAccount.currency,
-          accountType: virtualAccount.account_type,
-          status: virtualAccount.status,
-          reference: virtualAccount.reference,
-          customerId: virtualAccount.customer_id,
-          customerReference: virtualAccount.customer_reference,
-          amount: virtualAccount.amount,
-          expirationDatetime: virtualAccount.account_expiration_datetime,
-          createdDatetime: virtualAccount.created_datetime,
-          note: virtualAccount.note,
-          meta: virtualAccount.meta,
-        },
-      })
-    } else {
-      return res.status(400).json({
-        message: "Failed to retrieve virtual account",
-        error: flutterwaveResponse.message,
-      })
-    }
-  } catch (error) {
-    console.error("Get virtual account by ID error:", error)
-    return res.status(500).json({
-      message: "Server error during virtual account retrieval",
-      error: error.message,
-    })
-  }
-}
+// Removed Flutterwave get virtual account by ID
 
 /**
  * Create a new virtual account with extended expiry
  * Note: Flutterwave does not allow updating expiry of existing accounts
  */
-export const createExtendedVirtualAccount = async (req, res) => {
-  const userId = req.user.id
-  const { expiry = 86400 } = req.body // Default: 24 hours
-
-  try {
-    console.log(`🔄 Creating new virtual account with extended expiry: ${expiry} seconds`)
-
-    if (!expiry || expiry < 60 || expiry > 31536000) {
-      return res.status(400).json({
-        message: "Invalid expiry time. Must be between 60 and 31536000 seconds",
-      })
-    }
-
-    // Create a new virtual account with the specified expiry
-    // This will reuse the existing createWallet logic but with custom expiry
-    req.body = {
-      ...req.body,
-      currency: "NGN",
-      account_type: "static",
-      amount: 1,
-      expiry: expiry
-    }
-
-    // Call the existing createWallet function
-    return await createWallet(req, res)
-
-  } catch (error) {
-    console.error("Create extended virtual account error:", error)
-    return res.status(500).json({
-      message: "Server error creating extended virtual account",
-      error: error.message,
-    })
-  }
-}
+// Removed Flutterwave extended virtual account creation
 
 /**
  * Force create a new wallet (for expired accounts)
  */
-export const forceCreateWallet = async (req, res) => {
-  const userId = req.user.id
-  const { currency = "NGN", account_type = "static", amount = 1, expiry = 86400 } = req.body
-
-  try {
-    console.log(`🔄 Force creating new wallet for user: ${userId}`)
-
-    // Get user details
-    const user = await findUserById(userId)
-    if (!user) {
-      return res.status(404).json({ message: "User not found" })
-    }
-
-    // Check if KYC is approved (optional but recommended)
-    if (user.kycStatus !== "approved") {
-      return res.status(403).json({
-        message: "KYC verification required. Please complete KYC verification before creating a wallet.",
-        kycStatus: user.kycStatus,
-      })
-    }
-
-    // Mark existing wallet as inactive before creating new one
-    if (user.walletAccountNumber) {
-      console.log(`⚠️ Marking existing wallet as inactive`)
-      await pool.execute(
-        "UPDATE users SET walletActive = 0 WHERE id = ?",
-        [userId]
-      )
-    }
-
-    // Set the request body and call createWallet
-    req.body = {
-      currency,
-      account_type,
-      amount,
-      expiry
-    }
-
-    // Call the existing createWallet function
-    return await createWallet(req, res)
-
-  } catch (error) {
-    console.error("Force create wallet error:", error)
-    return res.status(500).json({
-      message: "Server error force creating wallet",
-      error: error.message,
-    })
-  }
-}
+// Removed Flutterwave force create
 
 /**
  * Check virtual account expiry status
  */
-export const checkVirtualAccountExpiry = async (req, res) => {
-  const { virtualAccountId } = req.params
+// Removed Flutterwave expiry check
 
+// ===================== KoraPay NGN Virtual Bank Accounts =====================
+
+/**
+ * Create NGN Virtual Bank Account (KoraPay)
+ * Requires: account_name, account_reference, permanent=true, bank_code, customer{name,email}, kyc{bvn,[nin]}
+ */
+export const korapayCreateVBA = async (req, res) => {
   try {
-    console.log(`⏰ Checking virtual account expiry: ${virtualAccountId}`)
+    const userId = req.user?.id
+    const user = userId ? await findUserById(userId) : null
 
-    // Call Flutterwave API to get virtual account details
-    const flutterwaveResponse = await flutterwaveRequest("GET", `/virtual-accounts/${virtualAccountId}`)
+    const {
+      account_name,
+      account_reference,
+      permanent = true,
+      bank_code = "000",
+      customer,
+      kyc,
+    } = req.body || {}
 
-    if (flutterwaveResponse.status === "success") {
-      const virtualAccount = flutterwaveResponse.data
-      const expirationDate = new Date(virtualAccount.account_expiration_datetime)
-      const now = new Date()
-      const timeUntilExpiry = expirationDate.getTime() - now.getTime()
-      const hoursUntilExpiry = Math.floor(timeUntilExpiry / (1000 * 60 * 60))
-      const minutesUntilExpiry = Math.floor((timeUntilExpiry % (1000 * 60 * 60)) / (1000 * 60))
-
-      const isExpired = timeUntilExpiry <= 0
-      const isExpiringSoon = timeUntilExpiry <= (60 * 60 * 1000) // 1 hour
-
-      return res.json({
-        message: "Virtual account expiry status retrieved successfully",
-        status: {
-          isExpired,
-          isExpiringSoon,
-          expirationDate: virtualAccount.account_expiration_datetime,
-          timeUntilExpiry: timeUntilExpiry,
-          hoursUntilExpiry: Math.max(0, hoursUntilExpiry),
-          minutesUntilExpiry: Math.max(0, minutesUntilExpiry),
-          accountStatus: virtualAccount.status,
-        },
-        virtualAccount: {
-          id: virtualAccount.id,
-          accountNumber: virtualAccount.account_number,
-          accountName: virtualAccount.account_name,
-          bankName: virtualAccount.account_bank_name,
-          currency: virtualAccount.currency,
-          accountType: virtualAccount.account_type,
-          status: virtualAccount.status,
-          reference: virtualAccount.reference,
-          customerId: virtualAccount.customer_id,
-        },
-      })
-    } else {
-      return res.status(400).json({
-        message: "Failed to retrieve virtual account expiry status",
-        error: flutterwaveResponse.message,
-      })
+    if (!KORAPAY_SECRET_KEY) {
+      return res.status(500).json({ message: "KoraPay secret key not configured" })
     }
+
+    if (!account_name || !account_reference || typeof permanent !== "boolean" || !bank_code || !customer || !customer.name || !kyc || !kyc.bvn) {
+      return res.status(400).json({ message: "Missing required fields for KoraPay VBA creation" })
+    }
+
+    // Ensure a stable, unique reference; if user present, prefix with userId
+    const finalReference = userId ? `${account_reference}-${userId}` : account_reference
+
+    const payload = {
+      account_name,
+      account_reference: finalReference,
+      permanent: Boolean(permanent),
+      bank_code,
+      customer: {
+        name: customer.name,
+        ...(customer.email ? { email: customer.email } : {}),
+      },
+      kyc: {
+        bvn: kyc.bvn,
+        ...(kyc.nin ? { nin: kyc.nin } : {}),
+      },
+    }
+
+    const data = await korapayRequest("POST", "/virtual-bank-account", payload)
+    return res.status(201).json(data)
   } catch (error) {
-    console.error("Check virtual account expiry error:", error)
-    return res.status(500).json({
-      message: "Server error checking virtual account expiry",
-      error: error.message,
-    })
+    return res.status(500).json({ message: error.message })
   }
 }
+
+/**
+ * Retrieve NGN Virtual Bank Account by account_reference (KoraPay)
+ */
+export const korapayGetVBA = async (req, res) => {
+  try {
+    const { accountReference } = req.params
+    if (!accountReference) return res.status(400).json({ message: "accountReference is required" })
+    // Try exact reference first
+    try {
+      const data = await korapayRequest("GET", `/virtual-bank-account/${encodeURIComponent(accountReference)}`)
+      return res.json(data)
+    } catch (e) {
+      // If the reference was created with userId suffix, try appending it
+      const userId = req.user?.id
+      if (userId && !accountReference.includes("-")) {
+        try {
+          const withUser = `${accountReference}-${userId}`
+          const data2 = await korapayRequest("GET", `/virtual-bank-account/${encodeURIComponent(withUser)}`)
+          return res.json(data2)
+        } catch (e2) {
+          // fall through
+        }
+      }
+      throw e
+    }
+  } catch (error) {
+    return res.status(500).json({ message: error.message })
+  }
+}
+
+/**
+ * Webhook for KoraPay (charge.success)
+ * We verify the payment using charges/:reference before crediting the wallet
+ */
+export const korapayWebhook = async (req, res) => {
+  try {
+    const { event, data } = req.body || {}
+    if (!event || !data) return res.status(400).json({ message: "Invalid webhook payload" })
+
+    if (event === "charge.success") {
+      const reference = data.reference
+      if (!reference) return res.status(200).json({ message: "No reference to verify" })
+
+      // Verify charge
+      let charge
+      try {
+        charge = await korapayRequest("GET", `/charges/${encodeURIComponent(reference)}`)
+      } catch (e) {
+        console.error("Failed to verify KoraPay charge:", e.message)
+        return res.status(200).json({ message: "received" })
+      }
+
+      const status = charge?.data?.status || charge?.data?.data?.status || charge?.status
+      if (status !== "success") {
+        return res.status(200).json({ message: "Charge not successful" })
+      }
+
+      const amount = Number(charge?.data?.amount_paid || charge?.data?.amount || data.amount || 0)
+      const currency = charge?.data?.currency || data.currency || "NGN"
+
+      // Extract userId from account_reference if present (format we set: <ref>-<userId>)
+      const accountReference = data?.virtual_bank_account_details?.virtual_bank_account?.account_reference || charge?.data?.virtual_bank_account?.account_reference
+      let userIdFromRef = null
+      if (accountReference && accountReference.includes("-")) {
+        const parts = accountReference.split("-")
+        const last = parts[parts.length - 1]
+        if (/^\d+$/.test(last)) userIdFromRef = parseInt(last, 10)
+      }
+
+      if (userIdFromRef) {
+        try {
+          await createWalletTransaction(userIdFromRef, {
+            reference,
+            amount,
+            currency,
+            type: "credit",
+            status: "success",
+            description: "Wallet funding via KoraPay VBA",
+            paystackReference: reference,
+            metadata: JSON.stringify({ webhook: req.body, verified: charge }),
+          })
+          console.log(`Wallet credited for user ${userIdFromRef}: ${amount} ${currency}`)
+        } catch (e) {
+          console.error("Failed to record wallet transaction:", e.message)
+        }
+      }
+    }
+
+    return res.status(200).json({ message: "received" })
+  } catch (error) {
+    console.error("KoraPay webhook error:", error)
+    return res.status(500).json({ message: "Webhook processing failed" })
+  }
+}
+
+/**
+ * Query a KoraPay charge by reference
+ */
+export const korapayGetCharge = async (req, res) => {
+  try {
+    const { reference } = req.params
+    if (!reference) return res.status(400).json({ message: "reference is required" })
+    const data = await korapayRequest("GET", `/charges/${encodeURIComponent(reference)}`)
+    return res.json(data)
+  } catch (error) {
+    return res.status(500).json({ message: error.message })
+  }
+}
+
+/**
+ * List transactions for a KoraPay virtual bank account (account_number required)
+ * Query params: account_number (required), start_date, end_date, page, limit
+ */
+export const korapayListVBATransactions = async (req, res) => {
+  try {
+    const { account_number, start_date, end_date, page, limit } = req.query
+    if (!account_number) return res.status(400).json({ message: "account_number is required" })
+    const params = { account_number }
+    if (start_date) params.start_date = start_date
+    if (end_date) params.end_date = end_date
+    if (page) params.page = page
+    if (limit) params.limit = limit
+
+    const data = await korapayRequest("GET", "/virtual-bank-account/transactions", null, params)
+    return res.json(data)
+  } catch (error) {
+    return res.status(500).json({ message: error.message })
+  }
+}
+
+/**
+ * Sandbox credit VBA (KoraPay)
+ * Body: account_number, currency="NGN", amount
+ */
+export const korapaySandboxCredit = async (req, res) => {
+  try {
+    const { account_number, currency = "NGN", amount } = req.body || {}
+    if (!account_number || !amount) return res.status(400).json({ message: "account_number and amount are required" })
+    const payload = { account_number, currency, amount }
+    const data = await korapayRequest("POST", "/virtual-bank-account/sandbox/credit", payload)
+    return res.status(201).json(data)
+  } catch (error) {
+    return res.status(500).json({ message: error.message })
+  }
+}
+
+/**
+ * Initiate a one-time bank transfer (KoraPay) to generate a temporary account
+ * Body: account_name, amount, currency, reference, customer{name,email}
+ */
+export const korapayInitiateBankTransfer = async (req, res) => {
+  try {
+    const userId = req.user?.id
+    const { account_name, amount, currency = "NGN", reference, customer } = req.body || {}
+    if (!account_name || !amount || !reference || !customer?.name || !customer?.email) {
+      return res.status(400).json({ message: "account_name, amount, currency, reference, customer{name,email} are required" })
+    }
+    const payload = { account_name, amount, currency, reference, customer }
+    const data = await korapayRequest("POST", "/charges/bank-transfer", payload)
+
+    // Try immediate verification; if already successful, credit wallet now
+    try {
+      const verify = await korapayRequest("GET", `/charges/${encodeURIComponent(reference)}`)
+      const charge = verify?.data || verify?.data?.data || {}
+      if (charge?.status === "success" && userId) {
+        const amountPaid = Number(charge?.amount_paid || charge?.amount || 0)
+        const creditedCurrency = charge?.currency || currency
+        await createWalletTransaction(userId, {
+          reference,
+          amount: amountPaid,
+          currency: creditedCurrency,
+          type: "credit",
+          status: "success",
+          description: "Wallet funding via KoraPay bank transfer",
+          paystackReference: reference,
+          metadata: JSON.stringify({ initiate: data, verified: verify }),
+        })
+        const balance = await getWalletBalance(userId)
+        return res.status(201).json({ message: "Bank transfer initiated and wallet credited", charge: verify, balance })
+      }
+    } catch (e) {
+      // Ignore verification errors here; client can confirm later
+    }
+
+    return res.status(201).json({ message: "Bank transfer initiated", data })
+  } catch (error) {
+    return res.status(500).json({ message: error.message })
+  }
+}
+
+/**
+ * Confirm a charge by reference and credit user's wallet on success
+ * Path: :reference
+ */
+export const korapayConfirmChargeAndCredit = async (req, res) => {
+  try {
+    const userId = req.user?.id
+    const { reference } = req.params
+    if (!userId) return res.status(401).json({ message: "Unauthorized" })
+    if (!reference) return res.status(400).json({ message: "reference is required" })
+
+    const chargeResp = await korapayRequest("GET", `/charges/${encodeURIComponent(reference)}`)
+    const charge = chargeResp?.data || chargeResp?.data?.data || {}
+    const status = charge?.status
+
+    // Return non-error for non-final states so clients can poll without showing failure
+    if (status !== "success") {
+      const httpCode = status === "failed" || status === "expired" ? 400 : 202
+      return res.status(httpCode).json({ message: status || "pending", charge: chargeResp })
+    }
+
+    const amountPaid = Number(charge?.amount_paid || charge?.amount || 0)
+    const currency = charge?.currency || "NGN"
+
+    // Record credit transaction for the authenticated user
+    try {
+      await createWalletTransaction(userId, {
+        reference,
+        amount: amountPaid,
+        currency,
+        type: "credit",
+        status: "success",
+        description: "Wallet funding via KoraPay bank transfer",
+        paystackReference: reference,
+        metadata: JSON.stringify({ verified: chargeResp }),
+      })
+    } catch (e) {
+      // If duplicate reference (unique), treat as idempotent success
+      if (e?.code !== 'ER_DUP_ENTRY') throw e
+    }
+
+    const balance = await getWalletBalance(userId)
+    return res.json({ message: "Wallet credited", balance, amount: amountPaid, currency })
+  } catch (error) {
+    return res.status(500).json({ message: error.message })
+  }
+}
+
