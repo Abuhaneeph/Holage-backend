@@ -9,7 +9,7 @@ import {
   deleteShipment
 } from "../models/Shipment.js"
 import { findUserById } from "../models/User.js"
-import { calculateStateDistance, estimateShippingCost } from "../utils/distanceCalculator.js"
+import { calculateStateDistance, estimateShippingCost, slugify } from "../utils/distanceCalculator.js"
 
 /**
  * Create a new shipment
@@ -30,7 +30,9 @@ export const createNewShipment = async (req, res) => {
 
     const {
       pickupState,
+      pickupLga,
       destinationState,
+      destinationLga,
       cargoType,
       weight,
       truckType,
@@ -41,7 +43,9 @@ export const createNewShipment = async (req, res) => {
     // Log received data for debugging
     console.log("Creating shipment with data:", {
       pickupState,
+      pickupLga,
       destinationState,
+      destinationLga,
       cargoType,
       weight,
       truckType,
@@ -50,43 +54,48 @@ export const createNewShipment = async (req, res) => {
     })
 
     // Validate required fields
-    if (!pickupState || !destinationState || !cargoType || !weight || !truckType || !pickupDate) {
+    if (!pickupState || !pickupLga || !destinationState || !destinationLga || !cargoType || !weight || !truckType || !pickupDate) {
       return res.status(400).json({ 
-        message: "All fields are required: pickupState, destinationState, cargoType, weight, truckType, pickupDate" 
+        message: "All fields are required: pickupState, pickupLga, destinationState, destinationLga, cargoType, weight, truckType, pickupDate" 
       })
     }
 
     // Validate that pickup and destination are different
-    if (pickupState === destinationState) {
+    if (
+      slugify(pickupState) === slugify(destinationState) &&
+      slugify(pickupLga) === slugify(destinationLga)
+    ) {
       return res.status(400).json({ 
-        message: "Pickup and destination states cannot be the same" 
+        message: "Pickup and destination locations cannot be the same" 
       })
     }
 
     // Calculate distance and cost
     let distanceResult, costEstimate
     try {
-      distanceResult = calculateStateDistance(pickupState, destinationState)
+      distanceResult = calculateStateDistance(pickupState, destinationState, pickupLga, destinationLga)
       costEstimate = estimateShippingCost(distanceResult.distance, parseFloat(weight))
     } catch (error) {
       console.error("Error calculating distance/cost:", error)
       // Provide fallback values if calculation fails
       distanceResult = { distance: 0, estimatedDuration: "N/A" }
-      costEstimate = { estimatedCost: 0 }
+      costEstimate = { totalCost: 0 }
     }
 
     // Create shipment
     const shipmentId = await createShipment({
       shipperId: userId,
       pickupState,
+      pickupLga,
       destinationState,
+      destinationLga,
       cargoType,
       weight: parseFloat(weight),
       truckType,
       pickupDate,
       fragileItems: fragileItems || false,
       distance: distanceResult?.distance || 0,
-      estimatedCost: costEstimate?.estimatedCost || 0,
+      estimatedCost: costEstimate?.totalCost || 0,
       estimatedDuration: distanceResult?.estimatedDuration || "N/A"
     })
 

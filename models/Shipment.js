@@ -7,7 +7,9 @@ export const createShipment = async (shipmentData) => {
   const {
     shipperId,
     pickupState,
+    pickupLga,
     destinationState,
+    destinationLga,
     cargoType,
     weight,
     truckType,
@@ -20,16 +22,18 @@ export const createShipment = async (shipmentData) => {
 
   const query = `
     INSERT INTO shipments 
-    (shipperId, pickupState, destinationState, cargoType, weight, truckType, 
+    (shipperId, pickupState, pickupLga, destinationState, destinationLga, cargoType, weight, truckType, 
      pickupDate, fragileItems, distance, estimatedCost, estimatedDuration, 
      status, createdAt)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NOW())
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NOW())
   `
   
   const [result] = await pool.execute(query, [
     shipperId || null,
     pickupState || null,
+    pickupLga || null,
     destinationState || null,
+    destinationLga || null,
     cargoType || null,
     weight || null,
     truckType || null,

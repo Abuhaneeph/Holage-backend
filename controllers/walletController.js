@@ -14,6 +14,7 @@ dotenv.config()
 // KoraPay config
 const KORAPAY_BASE_URL = process.env.KORAPAY_BASE_URL || "https://api.korapay.com/merchant/api/v1"
 const KORAPAY_SECRET_KEY = process.env.KORAPAY_SECRET_KEY
+const KORAPAY_BANK_CODE = process.env.KORAPAY_BANK_CODE || "000"
 
 const korapayRequest = async (method, endpoint, data = null, params = null) => {
   try {
@@ -50,8 +51,8 @@ export const createKorapayWalletForUser = async (userId) => {
   const user = await findUserById(userId)
   if (!user) throw new Error("User not found")
 
-  // Require BVN (Korapay requirement). If missing, skip gracefully.
-  if (!user.bvn) {
+  const trimmedBvn = user.bvn ? String(user.bvn).trim() : ""
+  if (!trimmedBvn) {
     return { skipped: true, reason: "BVN missing" }
   }
 
@@ -60,15 +61,22 @@ export const createKorapayWalletForUser = async (userId) => {
     account_name: user.fullName,
     account_reference: `${account_reference}-${userId}`,
     permanent: true,
-    bank_code: "000",
+    bank_code: KORAPAY_BANK_CODE,
     customer: {
       name: user.fullName,
-      email: user.email || undefined,
+      ...(user.email ? { email: user.email } : {}),
     },
-    kyc: {
-      bvn: String(user.bvn),
-      ...(user.nin ? { nin: String(user.nin) } : {}),
-    },
+  }
+
+  const kycPayload = {}
+  if (trimmedBvn) {
+    kycPayload.bvn = trimmedBvn
+  }
+  if (user.nin) {
+    kycPayload.nin = String(user.nin).trim()
+  }
+  if (Object.keys(kycPayload).length > 0) {
+    body.kyc = kycPayload
   }
 
   const resp = await korapayRequest("POST", "/virtual-bank-account", body)

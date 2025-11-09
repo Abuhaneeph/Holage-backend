@@ -1,0 +1,5 @@
+ALTER TABLE shipments
+ADD COLUMN IF NOT EXISTS pickupLga VARCHAR(100) NULL AFTER pickupState,
+ADD COLUMN IF NOT EXISTS destinationLga VARCHAR(100) NULL AFTER destinationState;
+
+

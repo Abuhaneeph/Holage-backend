@@ -23,12 +23,34 @@ const JWT_SECRET = process.env.JWT_SECRET
 export const register = async (req, res) => {
   const { fullName, email, password, role, nin, bvn } = req.body
 
-  if (!fullName || !email || !password || !role || !nin || !bvn) {
-    return res.status(400).json({ message: "Full name, email, password, role, NIN and BVN are required." })
+  if (!fullName || !email || !password || !role) {
+    return res.status(400).json({ message: "Full name, email, password, and role are required." })
   }
-  // Basic validation for NIN/BVN length (Nigeria standard is 11 digits)
-  if (!/^\d{11}$/.test(String(nin)) || !/^\d{11}$/.test(String(bvn))) {
-    return res.status(400).json({ message: "NIN and BVN must be 11 digits." })
+
+  const normalizedRole = typeof role === "string" ? role.trim().toLowerCase() : role
+  const sanitizedNin = nin !== undefined && nin !== null ? String(nin).trim() : null
+  const sanitizedBvn = bvn !== undefined && bvn !== null ? String(bvn).trim() : null
+  const requiresIdentityDocs = !["shipper", "trucker"].includes(normalizedRole)
+
+  if (requiresIdentityDocs) {
+    if (!sanitizedNin || !sanitizedBvn) {
+      return res
+        .status(400)
+        .json({ message: "NIN and BVN are required for this user role." })
+    }
+  }
+
+  const validateDigits = (value, label) => {
+    if (value && !/^\d{11}$/.test(value)) {
+      throw new Error(`${label} must be 11 digits.`)
+    }
+  }
+
+  try {
+    validateDigits(sanitizedNin, "NIN")
+    validateDigits(sanitizedBvn, "BVN")
+  } catch (err) {
+    return res.status(400).json({ message: err.message })
   }
 
   try {
@@ -43,15 +65,28 @@ export const register = async (req, res) => {
     // Set expiration time (e.g., 10 minutes from now)
     const codeExpiration = new Date(Date.now() + 10 * 60 * 1000) // 10 minutes
 
-    const userId = await createUser(fullName, email, password, role, verificationCode, codeExpiration, String(nin), String(bvn))
+    const userId = await createUser(
+      fullName,
+      email,
+      password,
+      normalizedRole,
+      verificationCode,
+      codeExpiration,
+      sanitizedNin || null,
+      sanitizedBvn || null,
+    )
 
     await sendVerificationEmail(email, verificationCode)
 
-    // Attempt KoraPay wallet creation (silent skip if BVN missing)
-    try {
-      await createKorapayWalletForUser(userId)
-    } catch (e) {
-      console.log("KoraPay wallet creation deferred:", e.message)
+    // Attempt KoraPay wallet creation only when BVN is available
+    if (sanitizedBvn) {
+      try {
+        await createKorapayWalletForUser(userId)
+      } catch (e) {
+        console.log("KoraPay wallet creation deferred:", e.message)
+      }
+    } else {
+      console.log("KoraPay wallet creation deferred: BVN missing at signup")
     }
 
     res.status(201).json({
@@ -152,8 +187,10 @@ export const verifyEmail = async (req, res) => {
       token: authToken,
       user: {
         id: user.id,
+        fullName: user.fullName,
         email: user.email,
         role: user.role,
+        kycStatus: user.kycStatus,
         emailVerified: true
       }
     })

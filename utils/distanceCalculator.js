@@ -35,7 +35,92 @@ const stateCoordinates = {
   'sokoto': { name: 'Sokoto', capital: 'Sokoto', lat: 13.0622, lng: 5.2339 },
   'taraba': { name: 'Taraba', capital: 'Jalingo', lat: 8.8833, lng: 11.3667 },
   'yobe': { name: 'Yobe', capital: 'Damaturu', lat: 11.7478, lng: 11.9605 },
-  'zamfara': { name: 'Zamfara', capital: 'Gusau', lat: 12.1704, lng: 6.6590 }
+  'zamfara': { name: 'Zamfara', capital: 'Gusau', lat: 12.1704, lng: 6.6590 },
+  'fct': { name: 'Federal Capital Territory', capital: 'Abuja', lat: 9.0765, lng: 7.3986 }
+}
+
+const stateAliases = {
+  'federal-capital-territory': 'fct',
+  'abuja': 'fct',
+}
+
+const slugify = (value) => {
+  if (!value) return ''
+  return value
+    .toString()
+    .toLowerCase()
+    .trim()
+    .replace(/['’]/g, '')
+    .replace(/&/g, 'and')
+    .replace(/[^a-z0-9\s-]/g, '')
+    .replace(/[\s_]+/g, '-')
+}
+
+const titleCase = (value) => {
+  if (!value) return ''
+  return value
+    .toString()
+    .split(/[-_]/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ')
+}
+
+const generateOffsetFromSlug = (slug) => {
+  if (!slug) {
+    return { latOffset: 0, lngOffset: 0 }
+  }
+
+  let hash = 0
+  for (let i = 0; i < slug.length; i += 1) {
+    hash = (hash * 33 + slug.charCodeAt(i)) >>> 0
+  }
+
+  const latOffset = (((hash % 1600) / 1600) - 0.5) * 1.2 // +/- 0.6 degrees
+  const lngOffset = ((((Math.floor(hash / 1600)) % 1600) / 1600) - 0.5) * 1.2
+
+  return { latOffset, lngOffset }
+}
+
+const normalizeState = (state) => {
+  if (!state) return null
+  let slug = slugify(state)
+  if (stateAliases[slug]) {
+    slug = stateAliases[slug]
+  }
+  return slug
+}
+
+const getLocationCoordinates = (stateInput, lgaInput) => {
+  const stateSlug = normalizeState(stateInput)
+  if (!stateSlug || !stateCoordinates[stateSlug]) {
+    throw new Error(`Invalid state: ${stateInput}`)
+  }
+
+  const stateInfo = stateCoordinates[stateSlug]
+
+  if (!lgaInput) {
+    return {
+      lat: stateInfo.lat,
+      lng: stateInfo.lng,
+      stateName: stateInfo.name,
+      stateSlug,
+      lgaName: null,
+      lgaSlug: null,
+    }
+  }
+
+  const lgaSlug = slugify(lgaInput)
+  const { latOffset, lngOffset } = generateOffsetFromSlug(lgaSlug)
+
+  return {
+    lat: stateInfo.lat + latOffset,
+    lng: stateInfo.lng + lngOffset,
+    stateName: stateInfo.name,
+    stateSlug,
+    lgaName: titleCase(lgaInput),
+    lgaSlug,
+  }
 }
 
 /**
@@ -76,53 +161,38 @@ function haversineDistance(lat1, lon1, lat2, lon2) {
  * @param {string} destinationState - Destination state code
  * @returns {object} Object containing distance and route info
  */
-function calculateStateDistance(pickupState, destinationState) {
-  // Normalize state names to lowercase and handle variations
-  const normalizeState = (state) => {
-    if (!state) return null
-    return state.toLowerCase().trim().replace(/\s+/g, '-')
-  }
-  
-  const pickup = normalizeState(pickupState)
-  const destination = normalizeState(destinationState)
-  
-  // Validate states exist
-  if (!stateCoordinates[pickup]) {
-    throw new Error(`Invalid pickup state: ${pickupState}`)
-  }
-  
-  if (!stateCoordinates[destination]) {
-    throw new Error(`Invalid destination state: ${destinationState}`)
-  }
-  
-  // Same state
-  if (pickup === destination) {
+function calculateStateDistance(pickupState, destinationState, pickupLga = null, destinationLga = null) {
+  const pickupInfo = getLocationCoordinates(pickupState, pickupLga)
+  const destinationInfo = getLocationCoordinates(destinationState, destinationLga)
+
+  // If both state and LGA match
+  if (
+    pickupInfo.stateSlug === destinationInfo.stateSlug &&
+    (pickupInfo.lgaSlug || '') === (destinationInfo.lgaSlug || '')
+  ) {
     return {
-      pickupState: stateCoordinates[pickup].name,
-      destinationState: stateCoordinates[destination].name,
+      pickupState: pickupInfo.stateName,
+      pickupLga: pickupInfo.lgaName,
+      destinationState: destinationInfo.stateName,
+      destinationLga: destinationInfo.lgaName,
       distance: 0,
       estimatedDuration: '0 hours',
-      route: `Within ${stateCoordinates[pickup].name} State`
+      route: pickupInfo.lgaName
+        ? `Within ${pickupInfo.lgaName}, ${pickupInfo.stateName}`
+        : `Within ${pickupInfo.stateName} State`,
     }
   }
-  
-  // Get coordinates
-  const pickupCoords = stateCoordinates[pickup]
-  const destCoords = stateCoordinates[destination]
-  
-  // Calculate distance
+
   const distance = haversineDistance(
-    pickupCoords.lat,
-    pickupCoords.lng,
-    destCoords.lat,
-    destCoords.lng
+    pickupInfo.lat,
+    pickupInfo.lng,
+    destinationInfo.lat,
+    destinationInfo.lng,
   )
-  
-  // Estimate duration (assuming average speed of 60 km/h on Nigerian roads)
-  const averageSpeed = 60 // km/h
+
+  const averageSpeed = 60
   const durationHours = Math.ceil(distance / averageSpeed)
-  
-  // Format duration
+
   let estimatedDuration
   if (durationHours < 1) {
     estimatedDuration = 'Less than 1 hour'
@@ -134,15 +204,22 @@ function calculateStateDistance(pickupState, destinationState) {
     const days = Math.ceil(durationHours / 24)
     estimatedDuration = `${days} ${days === 1 ? 'day' : 'days'}`
   }
-  
+
+  const pickupLabel = pickupInfo.lgaName
+    ? `${pickupInfo.lgaName} (${pickupInfo.stateName})`
+    : `${pickupInfo.stateName}`
+  const destinationLabel = destinationInfo.lgaName
+    ? `${destinationInfo.lgaName} (${destinationInfo.stateName})`
+    : `${destinationInfo.stateName}`
+
   return {
-    pickupState: pickupCoords.name,
-    pickupCapital: pickupCoords.capital,
-    destinationState: destCoords.name,
-    destinationCapital: destCoords.capital,
-    distance: distance, // in kilometers
-    estimatedDuration: estimatedDuration,
-    route: `${pickupCoords.capital} (${pickupCoords.name}) → ${destCoords.capital} (${destCoords.name})`
+    pickupState: pickupInfo.stateName,
+    pickupLga: pickupInfo.lgaName,
+    destinationState: destinationInfo.stateName,
+    destinationLga: destinationInfo.lgaName,
+    distance,
+    estimatedDuration,
+    route: `${pickupLabel} → ${destinationLabel}`,
   }
 }
 
@@ -218,6 +295,8 @@ export {
   getAllStates,
   estimateShippingCost,
   getTonnageRate,
-  stateCoordinates
+  stateCoordinates,
+  slugify,
+  titleCase,
 }
 

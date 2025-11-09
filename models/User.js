@@ -6,7 +6,7 @@ export const createUser = async (fullName, email, password, role, verificationTo
   const hashedPassword = await bcrypt.hash(password, 10)
   const [result] = await pool.execute(
     "INSERT INTO users (fullName, email, password, role, verificationToken, nin, bvn) VALUES (?, ?, ?, ?, ?, ?, ?)",
-    [fullName, email, hashedPassword, role, verificationToken, nin, bvn],
+    [fullName, email, hashedPassword, role, verificationToken, nin ?? null, bvn ?? null],
   )
   return result.insertId
 }

@@ -11,6 +11,9 @@ yarn-error.log*
 .env.test.local
 .env.production.local
 
+# RSA Keys
+keys/*.pem
+
 # Uploads
 uploads/*
 !uploads/.gitkeep

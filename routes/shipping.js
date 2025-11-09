@@ -1,5 +1,6 @@
 import express from 'express';
 import { calculateStateDistance, estimateShippingCost } from '../utils/distanceCalculator.js';
+import { getStatesWithLgas } from '../utils/locationService.js';
 import {
   createNewShipment,
   getMyShipments,
@@ -21,16 +22,16 @@ const router = express.Router();
  */
 router.post('/calculate-distance', async (req, res) => {
   try {
-    const { pickupState, destinationState } = req.body;
+    const { pickupState, pickupLga, destinationState, destinationLga } = req.body;
 
-    if (!pickupState || !destinationState) {
+    if (!pickupState || !pickupLga || !destinationState || !destinationLga) {
       return res.status(400).json({
         success: false,
-        message: 'Both pickup state and destination state are required'
+        message: 'Pickup and destination states and LGAs are required'
       });
     }
 
-    const result = calculateStateDistance(pickupState, destinationState);
+    const result = calculateStateDistance(pickupState, destinationState, pickupLga, destinationLga);
 
     res.json({
       success: true,
@@ -53,17 +54,17 @@ router.post('/calculate-distance', async (req, res) => {
  */
 router.post('/estimate-cost', async (req, res) => {
   try {
-    const { pickupState, destinationState, weight } = req.body;
+    const { pickupState, pickupLga, destinationState, destinationLga, weight } = req.body;
 
-    if (!pickupState || !destinationState) {
+    if (!pickupState || !pickupLga || !destinationState || !destinationLga) {
       return res.status(400).json({
         success: false,
-        message: 'Both pickup state and destination state are required'
+        message: 'Pickup and destination states and LGAs are required'
       });
     }
 
     // Calculate distance
-    const distanceResult = calculateStateDistance(pickupState, destinationState);
+    const distanceResult = calculateStateDistance(pickupState, destinationState, pickupLga, destinationLga);
     
     // Calculate cost
     const costEstimate = estimateShippingCost(distanceResult.distance, weight || 1);
@@ -82,6 +83,27 @@ router.post('/estimate-cost', async (req, res) => {
       success: false,
       message: error.message || 'Error estimating cost'
     });
+  }
+});
+
+/**
+ * @route GET /api/shipping/locations/states
+ * @desc  Get Nigerian states and their LGAs
+ * @access Public
+ */
+router.get('/locations/states', async (req, res) => {
+  try {
+    const states = await getStatesWithLgas()
+    res.json({
+      success: true,
+      data: states,
+    })
+  } catch (error) {
+    console.error('States fetch error:', error)
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Unable to fetch states at this time',
+    })
   }
 });
 
