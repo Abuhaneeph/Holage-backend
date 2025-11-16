@@ -1,6 +1,7 @@
 import multer from "multer"
 import { v2 as cloudinary } from "cloudinary"
-import { updateKycInfo, findUserById } from "../models/User.js"
+import pool from "../config/db.js"
+import { updateKycInfo, findUserById, updateUserBankAccount } from "../models/User.js"
 
 // Configure Cloudinary
 cloudinary.config({
@@ -66,12 +67,15 @@ export const submitKyc = (req, res) => {
     }
 
     const userId = req.user.id // From auth middleware
-    const { phone, address, nin, plateNumber, vehicleType } = req.body
+    const { phone, address, nin, plateNumber, vehicleType, bankAccountNumber, bankCode, bankName } = req.body
 
     // Basic validation for compulsory personal info fields
     if (!phone || !address || !nin) {
       return res.status(400).json({ message: "Phone, address, and NIN are compulsory." })
     }
+
+    // Bank account details are optional for all roles
+    // No validation required - users can add/update later via profile
 
     try {
       // Upload files to Cloudinary
@@ -132,6 +136,16 @@ export const submitKyc = (req, res) => {
       }
 
       await updateKycInfo(userId, kycData)
+
+      // Update bank account details if provided (for all roles - optional)
+      if (bankAccountNumber && bankCode) {
+        await updateUserBankAccount(userId, {
+          bankAccountNumber,
+          bankCode,
+          bankName: bankName || null
+        })
+      }
+
       res.status(200).json({ 
         message: "KYC information submitted successfully for review.", 
         kycStatus: "pending",
@@ -192,6 +206,9 @@ export const getKycDocuments = async (req, res) => {
       nin: user.nin || null,
       plateNumber: user.plateNumber || null,
       vehicleType: user.vehicleType || null,
+      bankAccountNumber: user.bankAccountNumber || null,
+      bankCode: user.bankCode || null,
+      bankName: user.bankName || null,
       role: user.role
     }
     
@@ -199,6 +216,181 @@ export const getKycDocuments = async (req, res) => {
   } catch (error) {
     console.error("Error fetching KYC documents:", error)
     res.status(500).json({ message: "Server error fetching KYC documents." })
+  }
+}
+
+/**
+ * Update bank account details (for profile page updates)
+ */
+export const updateBankAccount = async (req, res) => {
+  try {
+    const userId = req.user.id
+    const { bankAccountNumber, bankCode, bankName } = req.body || {}
+
+    // Validate that if any bank field is provided, account number and code are required
+    if (bankAccountNumber || bankCode || bankName) {
+      if (!bankAccountNumber || !bankCode) {
+        return res.status(400).json({ 
+          message: "Both account number and bank code are required when updating bank details." 
+        })
+      }
+
+      // Validate bank code format (should be 3 digits)
+      if (!/^\d{3}$/.test(bankCode)) {
+        return res.status(400).json({ 
+          message: "Invalid bank code format. Bank code must be 3 digits." 
+        })
+      }
+
+      // Validate account number format (should be 10 digits)
+      if (!/^\d{10}$/.test(bankAccountNumber)) {
+        return res.status(400).json({ 
+          message: "Invalid account number format. Account number must be 10 digits." 
+        })
+      }
+    }
+
+    // Update bank account details
+    await updateUserBankAccount(userId, {
+      bankAccountNumber: bankAccountNumber || null,
+      bankCode: bankCode || null,
+      bankName: bankName || null
+    })
+
+    res.status(200).json({ 
+      success: true,
+      message: "Bank account details updated successfully" 
+    })
+  } catch (error) {
+    console.error("Error updating bank account:", error)
+    res.status(500).json({ message: "Server error updating bank account details." })
+  }
+}
+ 
+/**
+ * Get all KYC submissions (admin only)
+ */
+export const getAllKycSubmissions = async (req, res) => {
+  try {
+    const { status } = req.query
+    let query = `
+      SELECT 
+        id,
+        fullName,
+        email,
+        role,
+        phone,
+        address,
+        nin,
+        profilePhoto,
+        driverLicense,
+        vehicleReg,
+        utilityBill,
+        plateNumber,
+        vehicleType,
+        kycStatus,
+        createdAt
+      FROM users
+      WHERE kycStatus IS NOT NULL
+    `
+    const params = []
+
+    if (status) {
+      query += " AND kycStatus = ?"
+      params.push(status)
+    }
+
+    query += " ORDER BY createdAt DESC"
+
+    const [rows] = await pool.execute(query, params)
+
+    res.status(200).json({
+      success: true,
+      submissions: rows,
+    })
+  } catch (error) {
+    console.error("Error fetching KYC submissions:", error)
+    res.status(500).json({ message: "Server error while fetching KYC submissions." })
+  }
+}
+
+/**
+ * Get a single KYC submission by user ID (admin only)
+ */
+export const getKycSubmissionById = async (req, res) => {
+  try {
+    const { userId } = req.params
+
+    const user = await findUserById(userId)
+    if (!user) {
+      return res.status(404).json({ message: "User not found." })
+    }
+
+    const submission = {
+      id: user.id,
+      fullName: user.fullName,
+      email: user.email,
+      role: user.role,
+      phone: user.phone,
+      address: user.address,
+      nin: user.nin,
+      profilePhoto: user.profilePhoto,
+      driverLicense: user.driverLicense,
+      vehicleReg: user.vehicleReg,
+      utilityBill: user.utilityBill,
+      plateNumber: user.plateNumber,
+      vehicleType: user.vehicleType,
+      kycStatus: user.kycStatus,
+      createdAt: user.createdAt,
+    }
+
+    res.status(200).json({
+      success: true,
+      submission,
+    })
+  } catch (error) {
+    console.error("Error fetching KYC submission:", error)
+    res.status(500).json({ message: "Server error while fetching KYC submission." })
+  }
+}
+
+/**
+ * Approve or reject KYC submission (admin only)
+ */
+export const updateKycStatus = async (req, res) => {
+  try {
+    const adminId = req.user.id
+    const { userId } = req.params
+    const { status, rejectionReason } = req.body
+
+    if (!status) {
+      return res.status(400).json({ message: "Status is required." })
+    }
+
+    const validStatuses = ["pending", "approved", "rejected"]
+    if (!validStatuses.includes(status)) {
+      return res.status(400).json({ message: "Invalid status." })
+    }
+
+    // Check if user exists
+    const user = await findUserById(userId)
+    if (!user) {
+      return res.status(404).json({ message: "User not found." })
+    }
+
+    // Update KYC status
+    await pool.execute(
+      "UPDATE users SET kycStatus = ? WHERE id = ?",
+      [status, userId]
+    )
+
+    res.status(200).json({
+      success: true,
+      message: `KYC ${status} successfully.`,
+    })
+  } catch (error) {
+    console.error("Error updating KYC status:", error)
+    res.status(500).json({ message: "Server error while updating KYC status." })
   }
 }
 

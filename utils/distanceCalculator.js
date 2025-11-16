@@ -91,7 +91,11 @@ const normalizeState = (state) => {
   return slug
 }
 
-const getLocationCoordinates = (stateInput, lgaInput) => {
+/**
+ * Get location coordinates with improved LGA handling
+ * Uses geocoding when available, falls back to improved offset calculation
+ */
+const getLocationCoordinates = async (stateInput, lgaInput) => {
   const stateSlug = normalizeState(stateInput)
   if (!stateSlug || !stateCoordinates[stateSlug]) {
     throw new Error(`Invalid state: ${stateInput}`)
@@ -111,15 +115,54 @@ const getLocationCoordinates = (stateInput, lgaInput) => {
   }
 
   const lgaSlug = slugify(lgaInput)
-  const { latOffset, lngOffset } = generateOffsetFromSlug(lgaSlug)
-
-  return {
-    lat: stateInfo.lat + latOffset,
-    lng: stateInfo.lng + lngOffset,
-    stateName: stateInfo.name,
-    stateSlug,
-    lgaName: titleCase(lgaInput),
-    lgaSlug,
+  
+  // Try to get LGA coordinates from geocoding service
+  try {
+    const { getLGACoordinates } = await import('./lgaGeocoder.js')
+    const lgaCoords = await getLGACoordinates(stateSlug, lgaSlug, stateCoordinates)
+    
+    return {
+      lat: lgaCoords.lat,
+      lng: lgaCoords.lng,
+      stateName: stateInfo.name,
+      stateSlug,
+      lgaName: titleCase(lgaInput),
+      lgaSlug,
+    }
+  } catch (error) {
+    // Fallback to improved offset calculation if geocoding fails
+    console.warn(`Geocoding failed for ${lgaInput}, ${stateInfo.name}, using offset calculation:`, error.message)
+    
+    // Improved offset calculation based on LGA characteristics
+    const { latOffset, lngOffset } = generateOffsetFromSlug(lgaSlug)
+    
+    // Adjust offset based on LGA name patterns (more accurate distribution)
+    let adjustedLatOffset = latOffset
+    let adjustedLngOffset = lngOffset
+    
+    // If LGA name contains directional indicators, adjust accordingly
+    const lgaLower = lgaSlug.toLowerCase()
+    if (lgaLower.includes('north') || lgaLower.includes('northern')) {
+      adjustedLatOffset += 0.2 // Move north
+    }
+    if (lgaLower.includes('south') || lgaLower.includes('southern')) {
+      adjustedLatOffset -= 0.2 // Move south
+    }
+    if (lgaLower.includes('east') || lgaLower.includes('eastern')) {
+      adjustedLngOffset += 0.2 // Move east
+    }
+    if (lgaLower.includes('west') || lgaLower.includes('western')) {
+      adjustedLngOffset -= 0.2 // Move west
+    }
+    
+    return {
+      lat: stateInfo.lat + adjustedLatOffset,
+      lng: stateInfo.lng + adjustedLngOffset,
+      stateName: stateInfo.name,
+      stateSlug,
+      lgaName: titleCase(lgaInput),
+      lgaSlug,
+    }
   }
 }
 
@@ -155,15 +198,168 @@ function haversineDistance(lat1, lon1, lat2, lon2) {
 }
 
 /**
- * Calculate estimated distance between two Nigerian states
+ * Calculate distance and duration using OSRM (Open Source Routing Machine) API
+ * This provides more accurate road-based distance and duration
+ * 
+ * @param {number} startLat - Starting latitude
+ * @param {number} startLon - Starting longitude
+ * @param {number} endLat - Ending latitude
+ * @param {number} endLon - Ending longitude
+ * @returns {Promise<{distance: number, duration: number}>} Distance in km and duration in minutes
+ */
+async function calculateOSRMDistance(startLat, startLon, endLat, endLon) {
+  try {
+    const axios = (await import('axios')).default
+    // OSRM API expects: lon,lat;lon,lat format
+    const url = `https://router.project-osrm.org/route/v1/driving/${startLon},${startLat};${endLon},${endLat}?overview=false`
+    
+    console.log(`OSRM API call: ${url}`)
+    
+    const response = await axios.get(url, {
+      timeout: 10000, // 10 second timeout
+      headers: {
+        'User-Agent': 'Holage/1.0'
+      }
+    })
+
+    const data = response.data
+
+    // Check if response is valid
+    if (!data || data.code !== 'Ok') {
+      throw new Error(data?.code === 'NoRoute' ? 'No route found between locations' : 'Invalid OSRM response')
+    }
+
+    if (!data.routes || !Array.isArray(data.routes) || data.routes.length === 0) {
+      throw new Error('No routes in OSRM response')
+    }
+
+    const route = data.routes[0]
+    
+    // Validate route data
+    if (typeof route.distance !== 'number' || typeof route.duration !== 'number') {
+      throw new Error('Invalid route data: missing distance or duration')
+    }
+
+    // Convert distance from meters to kilometers
+    const distanceKm = route.distance / 1000
+    // Convert duration from seconds to minutes
+    const durationMin = route.duration / 60
+
+    console.log(`OSRM result: ${distanceKm.toFixed(2)} km, ${durationMin.toFixed(1)} minutes`)
+
+    return {
+      distance: Math.round(distanceKm * 10) / 10, // Round to 1 decimal place
+      duration: Math.round(durationMin)
+    }
+  } catch (error) {
+    console.error('OSRM API error:', error.message)
+    // Re-throw with more context if it's an axios error
+    if (error.response) {
+      throw new Error(`OSRM API error: ${error.response.status} - ${error.response.statusText}`)
+    }
+    throw error
+  }
+}
+
+/**
+ * Calculate estimated distance between two Nigerian states/LGAs
  * 
  * @param {string} pickupState - Pickup state code (e.g., 'lagos', 'abuja')
  * @param {string} destinationState - Destination state code
- * @returns {object} Object containing distance and route info
+ * @param {string} pickupLga - Pickup LGA slug (optional)
+ * @param {string} destinationLga - Destination LGA slug (optional)
+ * @param {object} pickupCoordinates - Optional: {lat, lng} for pickup location
+ * @param {object} destinationCoordinates - Optional: {lat, lng} for destination location
+ * @returns {Promise<object>} Object containing distance and route info
  */
-function calculateStateDistance(pickupState, destinationState, pickupLga = null, destinationLga = null) {
-  const pickupInfo = getLocationCoordinates(pickupState, pickupLga)
-  const destinationInfo = getLocationCoordinates(destinationState, destinationLga)
+// Validate coordinates are within Nigeria bounds
+function validateNigeriaCoordinates(lat, lng) {
+  // Nigeria bounds: approximately lat 4.2-13.9, lng 2.7-14.7
+  if (lat < 4 || lat > 14 || lng < 2 || lng > 15) {
+    console.warn(`Coordinates out of Nigeria bounds: lat=${lat}, lng=${lng}`)
+    return false
+  }
+  return true
+}
+
+// Check if coordinates might be swapped and correct them
+function correctSwappedCoordinates(lat, lng, stateName) {
+  // If latitude is less than longitude and both are reasonable for Nigeria, they might be swapped
+  // Also check if lat is suspiciously low for northern states
+  const northernStates = ['kano', 'kaduna', 'sokoto', 'katsina', 'zamfara', 'kebbi', 'jigawa', 'yobe', 'borno', 'bauchi', 'gombe', 'adamawa', 'taraba']
+  const isNorthernState = northernStates.includes(stateName?.toLowerCase() || '')
+  
+  // Northern states should have lat > 10, if lat < 10 and lng is reasonable, might be swapped
+  if (isNorthernState && lat < 10 && lng > 4 && lng < 15) {
+    console.warn(`Possible swapped coordinates for ${stateName}: lat=${lat}, lng=${lng}. Swapping...`)
+    return { lat: lng, lng: lat }
+  }
+  
+  // General check: if lat < lng and both are in Nigeria range, might be swapped
+  if (lat < lng && lat > 2 && lat < 15 && lng > 2 && lng < 15) {
+    // But only swap if the swapped version makes more sense (lat should be in 4-14 range)
+    const swappedLat = lng
+    if (swappedLat >= 4 && swappedLat <= 14) {
+      console.warn(`Possible swapped coordinates: lat=${lat}, lng=${lng}. Swapping...`)
+      return { lat: lng, lng: lat }
+    }
+  }
+  
+  return { lat, lng }
+}
+
+async function calculateStateDistance(pickupState, destinationState, pickupLga = null, destinationLga = null, pickupCoordinates = null, destinationCoordinates = null) {
+  let pickupInfo, destinationInfo
+  
+  // Use provided coordinates if available, otherwise get from state/LGA
+  if (pickupCoordinates && pickupCoordinates.lat && pickupCoordinates.lng) {
+    // Check and correct swapped coordinates
+    const corrected = correctSwappedCoordinates(pickupCoordinates.lat, pickupCoordinates.lng, pickupState)
+    
+    // Validate coordinates
+    if (!validateNigeriaCoordinates(corrected.lat, corrected.lng)) {
+      console.warn(`Invalid pickup coordinates for ${pickupState}/${pickupLga}: lat=${corrected.lat}, lng=${corrected.lng}. Attempting to geocode...`)
+      // Fall back to geocoding if coordinates are invalid
+      pickupInfo = await getLocationCoordinates(pickupState, pickupLga)
+    } else {
+      pickupInfo = {
+        lat: corrected.lat,
+        lng: corrected.lng,
+        stateName: pickupState ? titleCase(pickupState) : 'Unknown',
+        stateSlug: normalizeState(pickupState) || '',
+        lgaName: pickupLga ? titleCase(pickupLga) : null,
+        lgaSlug: pickupLga ? slugify(pickupLga) : null,
+      }
+    }
+  } else {
+    pickupInfo = await getLocationCoordinates(pickupState, pickupLga)
+  }
+  
+  if (destinationCoordinates && destinationCoordinates.lat && destinationCoordinates.lng) {
+    // Check and correct swapped coordinates
+    const corrected = correctSwappedCoordinates(destinationCoordinates.lat, destinationCoordinates.lng, destinationState)
+    
+    // Validate coordinates
+    if (!validateNigeriaCoordinates(corrected.lat, corrected.lng)) {
+      console.warn(`Invalid destination coordinates for ${destinationState}/${destinationLga}: lat=${corrected.lat}, lng=${corrected.lng}. Attempting to geocode...`)
+      // Fall back to geocoding if coordinates are invalid
+      destinationInfo = await getLocationCoordinates(destinationState, destinationLga)
+    } else {
+      destinationInfo = {
+        lat: corrected.lat,
+        lng: corrected.lng,
+        stateName: destinationState ? titleCase(destinationState) : 'Unknown',
+        stateSlug: normalizeState(destinationState) || '',
+        lgaName: destinationLga ? titleCase(destinationLga) : null,
+        lgaSlug: destinationLga ? slugify(destinationLga) : null,
+      }
+    }
+  } else {
+    destinationInfo = await getLocationCoordinates(destinationState, destinationLga)
+  }
+  
+  // Log coordinates being used for debugging
+  console.log(`Distance calculation: ${pickupState}/${pickupLga} (${pickupInfo.lat}, ${pickupInfo.lng}) to ${destinationState}/${destinationLga} (${destinationInfo.lat}, ${destinationInfo.lng})`)
 
   // If both state and LGA match
   if (
@@ -183,26 +379,63 @@ function calculateStateDistance(pickupState, destinationState, pickupLga = null,
     }
   }
 
-  const distance = haversineDistance(
-    pickupInfo.lat,
-    pickupInfo.lng,
-    destinationInfo.lat,
-    destinationInfo.lng,
-  )
+  // Try to use OSRM API for accurate road-based distance if coordinates are available
+  let distance, estimatedDuration
+  
+  try {
+    const osrmResult = await calculateOSRMDistance(
+      pickupInfo.lat,
+      pickupInfo.lng,
+      destinationInfo.lat,
+      destinationInfo.lng
+    )
+    
+    distance = osrmResult.distance
+    const durationMinutes = osrmResult.duration
+    
+    // Format duration
+    if (durationMinutes < 60) {
+      estimatedDuration = `${durationMinutes} ${durationMinutes === 1 ? 'minute' : 'minutes'}`
+    } else if (durationMinutes < 1440) {
+      const hours = Math.floor(durationMinutes / 60)
+      const minutes = durationMinutes % 60
+      if (minutes === 0) {
+        estimatedDuration = `${hours} ${hours === 1 ? 'hour' : 'hours'}`
+      } else {
+        estimatedDuration = `${hours} ${hours === 1 ? 'hour' : 'hours'} ${minutes} ${minutes === 1 ? 'minute' : 'minutes'}`
+      }
+    } else {
+      const days = Math.floor(durationMinutes / 1440)
+      const remainingHours = Math.floor((durationMinutes % 1440) / 60)
+      if (remainingHours === 0) {
+        estimatedDuration = `${days} ${days === 1 ? 'day' : 'days'}`
+      } else {
+        estimatedDuration = `${days} ${days === 1 ? 'day' : 'days'} ${remainingHours} ${remainingHours === 1 ? 'hour' : 'hours'}`
+      }
+    }
+  } catch (osrmError) {
+    // Fallback to Haversine distance if OSRM fails
+    console.warn('OSRM calculation failed, using Haversine distance:', osrmError.message)
+    distance = haversineDistance(
+      pickupInfo.lat,
+      pickupInfo.lng,
+      destinationInfo.lat,
+      destinationInfo.lng,
+    )
 
-  const averageSpeed = 60
-  const durationHours = Math.ceil(distance / averageSpeed)
+    const averageSpeed = 60
+    const durationHours = Math.ceil(distance / averageSpeed)
 
-  let estimatedDuration
-  if (durationHours < 1) {
-    estimatedDuration = 'Less than 1 hour'
-  } else if (durationHours === 1) {
-    estimatedDuration = '1 hour'
-  } else if (durationHours < 24) {
-    estimatedDuration = `${durationHours} hours`
-  } else {
-    const days = Math.ceil(durationHours / 24)
-    estimatedDuration = `${days} ${days === 1 ? 'day' : 'days'}`
+    if (durationHours < 1) {
+      estimatedDuration = 'Less than 1 hour'
+    } else if (durationHours === 1) {
+      estimatedDuration = '1 hour'
+    } else if (durationHours < 24) {
+      estimatedDuration = `${durationHours} hours`
+    } else {
+      const days = Math.ceil(durationHours / 24)
+      estimatedDuration = `${days} ${days === 1 ? 'day' : 'days'}`
+    }
   }
 
   const pickupLabel = pickupInfo.lgaName
@@ -247,7 +480,7 @@ function getTonnageRate(weight) {
 
 /**
  * Calculate estimated shipping cost based on diesel consumption and tonnage
- * Formula: (Distance ÷ Fuel Efficiency × Diesel Rate) + (Tonnage × Distance × Rate per Ton-KM) + Base Fee
+ * Formula: (Distance ÷ Fuel Efficiency × Diesel Rate) + (Tonnage × Distance × Rate per Ton-KM) + Base Fee + Fragile Fee + Insurance Fee
  * 
  * @param {number} distance - Distance in kilometers
  * @param {number} weight - Weight in tons
@@ -255,6 +488,8 @@ function getTonnageRate(weight) {
  * @param {number} options.dieselRate - Current diesel price per liter (default: ₦1,200)
  * @param {number} options.fuelEfficiency - KM per liter for loaded truck (default: 3 km/L)
  * @param {number} options.baseFee - Base service fee (default: ₦10,000)
+ * @param {boolean} options.fragileItems - Whether items are fragile/perishable (adds ₦300,000)
+ * @param {boolean} options.insurance - Whether insurance is selected (adds ₦200,000)
  * @returns {object} Cost breakdown
  */
 function estimateShippingCost(distance, weight = 1, options = {}) {
@@ -262,6 +497,10 @@ function estimateShippingCost(distance, weight = 1, options = {}) {
   const dieselRate = options.dieselRate || 1200        // ₦1,200 per liter
   const fuelEfficiency = options.fuelEfficiency || 3   // 3 km per liter
   const baseFee = options.baseFee || 10000             // ₦10,000 base service fee
+  const fragileFee = options.fragileItems ? 300000    // ₦300,000 for fragile/perishable items
+    : 0
+  const insuranceFee = options.insurance ? 200000       // ₦200,000 for insurance
+    : 0
   
   // Calculate diesel cost
   const litersNeeded = distance / fuelEfficiency
@@ -272,7 +511,7 @@ function estimateShippingCost(distance, weight = 1, options = {}) {
   const tonnageCost = weight * distance * tonnageRatePerKm
   
   // Calculate total cost
-  const totalCost = dieselCost + tonnageCost + baseFee
+  const totalCost = dieselCost + tonnageCost + baseFee + fragileFee + insuranceFee
   
   return {
     distance: distance,
@@ -284,6 +523,8 @@ function estimateShippingCost(distance, weight = 1, options = {}) {
     tonnageRatePerKm: tonnageRatePerKm,
     tonnageCost: Math.round(tonnageCost),
     baseFee: baseFee,
+    fragileFee: fragileFee,
+    insuranceFee: insuranceFee,
     totalCost: Math.round(totalCost),
     formattedCost: `₦${Math.round(totalCost).toLocaleString()}`
   }

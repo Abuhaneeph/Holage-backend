@@ -22,7 +22,14 @@ const router = express.Router();
  */
 router.post('/calculate-distance', async (req, res) => {
   try {
-    const { pickupState, pickupLga, destinationState, destinationLga } = req.body;
+    const { 
+      pickupState, 
+      pickupLga, 
+      destinationState, 
+      destinationLga,
+      pickupCoordinates,
+      destinationCoordinates
+    } = req.body;
 
     if (!pickupState || !pickupLga || !destinationState || !destinationLga) {
       return res.status(400).json({
@@ -31,7 +38,14 @@ router.post('/calculate-distance', async (req, res) => {
       });
     }
 
-    const result = calculateStateDistance(pickupState, destinationState, pickupLga, destinationLga);
+    const result = await calculateStateDistance(
+      pickupState, 
+      destinationState, 
+      pickupLga, 
+      destinationLga,
+      pickupCoordinates || null,
+      destinationCoordinates || null
+    );
 
     res.json({
       success: true,
@@ -54,7 +68,15 @@ router.post('/calculate-distance', async (req, res) => {
  */
 router.post('/estimate-cost', async (req, res) => {
   try {
-    const { pickupState, pickupLga, destinationState, destinationLga, weight } = req.body;
+    const { 
+      pickupState, 
+      pickupLga, 
+      destinationState, 
+      destinationLga, 
+      weight,
+      pickupCoordinates,
+      destinationCoordinates
+    } = req.body;
 
     if (!pickupState || !pickupLga || !destinationState || !destinationLga) {
       return res.status(400).json({
@@ -64,10 +86,39 @@ router.post('/estimate-cost', async (req, res) => {
     }
 
     // Calculate distance
-    const distanceResult = calculateStateDistance(pickupState, destinationState, pickupLga, destinationLga);
+    const distanceResult = await calculateStateDistance(
+      pickupState, 
+      destinationState, 
+      pickupLga, 
+      destinationLga,
+      pickupCoordinates || null,
+      destinationCoordinates || null
+    );
     
-    // Calculate cost
-    const costEstimate = estimateShippingCost(distanceResult.distance, weight || 1);
+    // Fetch diesel rate from database
+    let dieselRate = 1200; // Default value
+    try {
+      const pool = (await import('../config/db.js')).default;
+      const [rows] = await pool.execute(
+        "SELECT setting_value FROM system_settings WHERE setting_key = 'diesel_rate_per_liter'"
+      );
+      if (rows.length > 0) {
+        dieselRate = parseFloat(rows[0].setting_value) || 1200;
+      }
+    } catch (dbError) {
+      console.error('Error fetching diesel rate from database, using default:', dbError);
+    }
+    
+    // Get fragileItems and insurance from request body
+    const fragileItems = req.body.fragileItems || false;
+    const insurance = req.body.insurance || false;
+    
+    // Calculate cost with diesel rate from database
+    const costEstimate = estimateShippingCost(distanceResult.distance, weight || 1, { 
+      dieselRate,
+      fragileItems,
+      insurance
+    });
 
     res.json({
       success: true,

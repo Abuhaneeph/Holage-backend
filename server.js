@@ -8,6 +8,9 @@ import authRoutes from "./routes/auth.js"
 import kycRoutes from "./routes/kyc.js"
 import walletRoutes from "./routes/wallet.js"
 import shippingRoutes from "./routes/shipping.js"
+import truckRoutes from "./routes/trucks.js"
+import complaintRoutes from "./routes/complaints.js"
+import settingsRoutes from "./routes/settings.js"
 import pool from "./config/db.js" // Import to ensure connection is established
 import http from "http"
 import https from "https"
@@ -31,6 +34,9 @@ app.use("/api/auth", authRoutes)
 app.use("/api/kyc", kycRoutes)
 app.use("/api/wallet", walletRoutes)
 app.use("/api/shipping", shippingRoutes)
+app.use("/api/trucks", truckRoutes)
+app.use("/api/complaints", complaintRoutes)
+app.use("/api/settings", settingsRoutes)
 
 // Basic route for testing
 app.get("/", (req, res) => {

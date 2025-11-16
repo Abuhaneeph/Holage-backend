@@ -28,16 +28,14 @@ export const register = async (req, res) => {
   }
 
   const normalizedRole = typeof role === "string" ? role.trim().toLowerCase() : role
-  const sanitizedNin = nin !== undefined && nin !== null ? String(nin).trim() : null
-  const sanitizedBvn = bvn !== undefined && bvn !== null ? String(bvn).trim() : null
-  const requiresIdentityDocs = !["shipper", "trucker"].includes(normalizedRole)
-
-  if (requiresIdentityDocs) {
-    if (!sanitizedNin || !sanitizedBvn) {
-      return res
-        .status(400)
-        .json({ message: "NIN and BVN are required for this user role." })
-    }
+  // For fleet managers, NIN and BVN are not collected during signup (collected during KYC)
+  const sanitizedNin = normalizedRole === "fleet_manager" ? null : (nin !== undefined && nin !== null ? String(nin).trim() : null)
+  const sanitizedBvn = normalizedRole === "fleet_manager" ? null : (bvn !== undefined && bvn !== null ? String(bvn).trim() : null)
+  
+  // Validate role
+  const validRoles = ["shipper", "trucker", "fleet_manager", "admin"]
+  if (!validRoles.includes(normalizedRole)) {
+    return res.status(400).json({ message: "Invalid role. Must be one of: shipper, trucker, fleet_manager." })
   }
 
   const validateDigits = (value, label) => {
@@ -47,8 +45,13 @@ export const register = async (req, res) => {
   }
 
   try {
-    validateDigits(sanitizedNin, "NIN")
-    validateDigits(sanitizedBvn, "BVN")
+    // Only validate if provided
+    if (sanitizedNin) {
+      validateDigits(sanitizedNin, "NIN")
+    }
+    if (sanitizedBvn) {
+      validateDigits(sanitizedBvn, "BVN")
+    }
   } catch (err) {
     return res.status(400).json({ message: err.message })
   }

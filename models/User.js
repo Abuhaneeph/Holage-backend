@@ -203,5 +203,22 @@ export const getWalletBalance = async (userId) => {
     WHERE userId = ?
   `
   const [rows] = await pool.execute(query, [userId])
-  return rows[0]?.balance || 0
+  return parseFloat(rows[0]?.balance || 0)
+}
+
+export const updateUserBankAccount = async (userId, bankData) => {
+  const { bankAccountNumber, bankCode, bankName } = bankData
+  const query = `
+    UPDATE users SET
+      bankAccountNumber = ?,
+      bankCode = ?,
+      bankName = ?
+    WHERE id = ?
+  `
+  await pool.execute(query, [
+    bankAccountNumber || null,
+    bankCode || null,
+    bankName || null,
+    userId,
+  ])
 }

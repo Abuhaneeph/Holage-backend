@@ -8,7 +8,8 @@ import {
   updateShipmentStatus,
   deleteShipment
 } from "../models/Shipment.js"
-import { findUserById } from "../models/User.js"
+import { findUserById, getWalletBalance, createWalletTransaction } from "../models/User.js"
+import axios from "axios"
 import { calculateStateDistance, estimateShippingCost, slugify } from "../utils/distanceCalculator.js"
 
 /**
@@ -37,7 +38,8 @@ export const createNewShipment = async (req, res) => {
       weight,
       truckType,
       pickupDate,
-      fragileItems
+      fragileItems,
+      insurance
     } = req.body
 
     // Log received data for debugging
@@ -73,13 +75,62 @@ export const createNewShipment = async (req, res) => {
     // Calculate distance and cost
     let distanceResult, costEstimate
     try {
-      distanceResult = calculateStateDistance(pickupState, destinationState, pickupLga, destinationLga)
-      costEstimate = estimateShippingCost(distanceResult.distance, parseFloat(weight))
+      distanceResult = await calculateStateDistance(pickupState, destinationState, pickupLga, destinationLga)
+      
+      // Fetch diesel rate from database
+      let dieselRate = 1200; // Default value
+      try {
+        const pool = (await import("../config/db.js")).default;
+        const [rows] = await pool.execute(
+          "SELECT setting_value FROM system_settings WHERE setting_key = 'diesel_rate_per_liter'"
+        );
+        if (rows.length > 0) {
+          dieselRate = parseFloat(rows[0].setting_value) || 1200;
+        }
+      } catch (dbError) {
+        console.error("Error fetching diesel rate from database, using default:", dbError);
+      }
+      
+      // Validate distance result
+      if (!distanceResult || !distanceResult.distance || distanceResult.distance === 0) {
+        console.error("Invalid distance result:", distanceResult);
+        throw new Error("Failed to calculate distance between locations");
+      }
+      
+      costEstimate = estimateShippingCost(distanceResult.distance, parseFloat(weight), { 
+        dieselRate,
+        fragileItems: fragileItems || false,
+        insurance: insurance || false
+      })
+      
+      console.log("Cost calculation result:", {
+        distance: distanceResult.distance,
+        weight: parseFloat(weight),
+        dieselRate,
+        fragileItems: fragileItems || false,
+        insurance: insurance || false,
+        totalCost: costEstimate.totalCost
+      });
     } catch (error) {
       console.error("Error calculating distance/cost:", error)
+      console.error("Error stack:", error.stack)
       // Provide fallback values if calculation fails
       distanceResult = { distance: 0, estimatedDuration: "N/A" }
       costEstimate = { totalCost: 0 }
+    }
+
+    // Check wallet balance and deduct amount
+    const walletBalance = await getWalletBalance(userId)
+    const shipmentCost = costEstimate?.totalCost || 0
+    
+    if (shipmentCost <= 0) {
+      return res.status(400).json({ message: "Invalid shipment cost. Please check your shipment details." })
+    }
+
+    if (walletBalance < shipmentCost) {
+      return res.status(400).json({ 
+        message: `Insufficient wallet balance. Required: ₦${shipmentCost.toLocaleString()}, Available: ₦${walletBalance.toLocaleString()}` 
+      })
     }
 
     // Create shipment
@@ -94,9 +145,24 @@ export const createNewShipment = async (req, res) => {
       truckType,
       pickupDate,
       fragileItems: fragileItems || false,
+      insurance: insurance || false,
       distance: distanceResult?.distance || 0,
       estimatedCost: costEstimate?.totalCost || 0,
       estimatedDuration: distanceResult?.estimatedDuration || "N/A"
+    })
+
+    // Deduct amount from shipper's wallet
+    const timestamp = Date.now()
+    const debitReference = `SHIPMENT-${timestamp}-${shipmentId}`
+    await createWalletTransaction(userId, {
+      reference: debitReference,
+      amount: shipmentCost,
+      currency: "NGN",
+      type: "debit",
+      status: "success",
+      description: `Payment for shipment #${shipmentId}`,
+      paystackReference: null,
+      metadata: JSON.stringify({ shipmentId, costBreakdown: costEstimate })
     })
 
     // Get the created shipment
@@ -105,7 +171,8 @@ export const createNewShipment = async (req, res) => {
     res.status(201).json({
       success: true,
       message: "Shipment created successfully",
-      shipment
+      shipment,
+      walletBalance: await getWalletBalance(userId)
     })
 
   } catch (error) {
@@ -154,6 +221,7 @@ export const getMyShipments = async (req, res) => {
 
 /**
  * Get available shipments for truckers to bid on
+ * Supports filtering by pickupState, destinationState, and truckType
  */
 export const getAvailableShipmentsForTruckers = async (req, res) => {
   const userId = req.user.id
@@ -170,8 +238,20 @@ export const getAvailableShipmentsForTruckers = async (req, res) => {
 
     const limit = parseInt(req.query.limit) || 20
     const offset = parseInt(req.query.offset) || 0
+    
+    // Extract filters from query parameters
+    const filters = {}
+    if (req.query.pickupState) {
+      filters.pickupState = req.query.pickupState
+    }
+    if (req.query.destinationState) {
+      filters.destinationState = req.query.destinationState
+    }
+    if (req.query.truckType) {
+      filters.truckType = req.query.truckType
+    }
 
-    const shipments = await getAvailableShipments(limit, offset)
+    const shipments = await getAvailableShipments(limit, offset, filters)
 
     res.status(200).json({
       success: true,
@@ -295,17 +375,104 @@ export const acceptShipment = async (req, res) => {
       return res.status(400).json({ message: "Shipment already assigned to another trucker" })
     }
 
+    // Check if trucker has bank account details
+    if (!user.bankAccountNumber || !user.bankCode) {
+      return res.status(400).json({ 
+        message: "Bank account details required. Please update your profile with bank account information." 
+      })
+    }
+
     const success = await assignTruckerToShipment(shipmentId, userId)
     
     if (!success) {
       return res.status(400).json({ message: "Failed to assign shipment" })
     }
 
+    // Transfer payment to trucker via Paystack
+    const shipmentAmount = parseFloat(shipment.estimatedCost || 0)
+    if (shipmentAmount > 0) {
+      try {
+        const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY
+        if (!PAYSTACK_SECRET_KEY) {
+          console.error("Paystack secret key not configured")
+        } else {
+          // Create transfer recipient
+          const recipientData = {
+            type: "nuban",
+            name: user.fullName || "Trucker",
+            account_number: user.bankAccountNumber,
+            bank_code: user.bankCode,
+            currency: "NGN"
+          }
+
+          const recipientResponse = await axios.post(
+            "https://api.paystack.co/transferrecipient",
+            recipientData,
+            {
+              headers: {
+                Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
+                "Content-Type": "application/json"
+              }
+            }
+          )
+
+          if (recipientResponse.data.status && recipientResponse.data.data) {
+            // Perform transfer
+            const transferData = {
+              source: "balance",
+              amount: Math.round(shipmentAmount) * 100, // Convert to kobo
+              recipient: recipientResponse.data.data.recipient_code,
+              reason: `Payment for shipment #${shipmentId}`,
+              currency: "NGN"
+            }
+
+            const transferResponse = await axios.post(
+              "https://api.paystack.co/transfer",
+              transferData,
+              {
+                headers: {
+                  Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
+                  "Content-Type": "application/json"
+                }
+              }
+            )
+
+            if (transferResponse.data.status) {
+              // Record successful transfer
+              const timestamp = Date.now()
+              const creditReference = `PAYOUT-${timestamp}-${shipmentId}`
+              await createWalletTransaction(userId, {
+                reference: creditReference,
+                amount: shipmentAmount,
+                currency: "NGN",
+                type: "credit",
+                status: "success",
+                description: `Payment received for shipment #${shipmentId}`,
+                paystackReference: transferResponse.data.data.reference || creditReference,
+                metadata: JSON.stringify({ 
+                  shipmentId, 
+                  transfer: transferResponse.data.data,
+                  recipient: recipientResponse.data.data
+                })
+              })
+
+              console.log(`✅ Payment transferred to trucker ${userId}: ₦${shipmentAmount} for shipment #${shipmentId}`)
+            } else {
+              console.error("Transfer failed:", transferResponse.data)
+            }
+          }
+        }
+      } catch (transferError) {
+        console.error("Error transferring payment to trucker:", transferError.response?.data || transferError.message)
+        // Don't fail the shipment acceptance if transfer fails - can be retried later
+      }
+    }
+
     const updatedShipment = await getShipmentById(shipmentId)
 
     res.status(200).json({
       success: true,
-      message: "Shipment accepted successfully",
+      message: "Shipment accepted successfully. Payment has been transferred to your bank account.",
       shipment: updatedShipment
     })
 

@@ -7,6 +7,7 @@ import {
   createWalletTransaction,
   getWalletTransactions,
   getWalletBalance,
+  updateUserBankAccount,
 } from "../models/User.js"
 
 dotenv.config()
@@ -14,7 +15,41 @@ dotenv.config()
 // KoraPay config
 const KORAPAY_BASE_URL = process.env.KORAPAY_BASE_URL || "https://api.korapay.com/merchant/api/v1"
 const KORAPAY_SECRET_KEY = process.env.KORAPAY_SECRET_KEY
+const KORAPAY_PUBLIC_KEY = process.env.KORAPAY_PUBLIC_KEY
 const KORAPAY_BANK_CODE = process.env.KORAPAY_BANK_CODE || "000"
+
+// Paystack config
+const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY
+const PAYSTACK_PUBLIC_KEY = process.env.PAYSTACK_PUBLIC_KEY
+const PAYSTACK_BASE_URL = "https://api.paystack.co"
+
+// Paystack API request helper
+const paystackRequest = async (method, endpoint, data = null) => {
+  try {
+    const config = {
+      method,
+      url: `${PAYSTACK_BASE_URL}${endpoint}`,
+      headers: {
+        Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
+        "Content-Type": "application/json",
+      },
+    }
+
+    if (data) {
+      config.data = data
+    }
+
+    const response = await axios(config)
+    return response.data
+  } catch (error) {
+    const status = error.response?.status
+    const body = error.response?.data
+    console.error("❌ Paystack API Error:")
+    console.error("Status:", status)
+    console.error("Response:", JSON.stringify(body, null, 2))
+    throw new Error(body?.message || "Paystack API request failed")
+  }
+}
 
 const korapayRequest = async (method, endpoint, data = null, params = null) => {
   try {
@@ -64,200 +99,62 @@ export const createKorapayWalletForUser = async (userId) => {
     bank_code: KORAPAY_BANK_CODE,
     customer: {
       name: user.fullName,
-      ...(user.email ? { email: user.email } : {}),
+      email: user.email,
     },
+    bvn: trimmedBvn,
   }
 
-  const kycPayload = {}
-  if (trimmedBvn) {
-    kycPayload.bvn = trimmedBvn
-  }
-  if (user.nin) {
-    kycPayload.nin = String(user.nin).trim()
-  }
-  if (Object.keys(kycPayload).length > 0) {
-    body.kyc = kycPayload
-  }
+  const data = await korapayRequest("POST", "/virtual-bank-account", body)
+  const account = data?.data || data
 
-  const resp = await korapayRequest("POST", "/virtual-bank-account", body)
-  const acc = resp?.data || resp?.data?.data || resp
-
-  // Persist to users table using existing wallet fields
-  await updateUserWallet(userId, {
-    paystackCustomerCode: null,
-    paystackCustomerId: null,
-    walletAccountNumber: acc?.account_number,
-    walletAccountName: acc?.account_name || user.fullName,
-    walletBankName: acc?.bank_name || "KoraPay",
-    walletBankSlug: (acc?.bank_name || "korapay").toLowerCase().replace(/\s+/g, "-"),
-    walletBankId: null,
-    walletActive: acc?.account_status === "active" || true,
-    walletCurrency: acc?.currency || "NGN",
-    dedicatedAccountId: acc?.unique_id || null,
-  })
-
-  return { created: true, account: acc }
-}
-
-const FLUTTERWAVE_CLIENT_ID = process.env.FLUTTERWAVE_PUBLIC_KEY // Client ID
-const FLUTTERWAVE_CLIENT_SECRET = process.env.FLUTTERWAVE_SECRET_KEY // Client Secret
-const FLUTTERWAVE_BASE_URL = process.env.FLUTTERWAVE_BASE_URL || "https://developersandbox-api.flutterwave.com"
-const OAUTH_TOKEN_URL = "https://idp.flutterwave.com/realms/flutterwave/protocol/openid-connect/token"
-
-// Token cache
-let accessToken = null
-let tokenExpiresAt = 0
-
-/**
- * Get or refresh OAuth 2.0 access token
- */
-const getAccessToken = async () => {
-  const now = Date.now()
-  
-  // Return cached token if still valid (refresh 1 minute before expiry)
-  if (accessToken && tokenExpiresAt > now + 60000) {
-    return accessToken
-  }
-
-  try {
-    console.log("🔄 Refreshing Flutterwave OAuth token...")
-    
-    const params = new URLSearchParams()
-    params.append("client_id", FLUTTERWAVE_CLIENT_ID)
-    params.append("client_secret", FLUTTERWAVE_CLIENT_SECRET)
-    params.append("grant_type", "client_credentials")
-
-    const response = await axios.post(OAUTH_TOKEN_URL, params, {
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
-      },
+  if (account?.account_number) {
+    await updateUserWallet(userId, {
+      walletAccountNumber: account.account_number,
+      walletAccountName: account.account_name,
+      walletBankName: account.bank?.name || "KoraPay",
+      walletBankSlug: account.bank?.slug || "korapay",
+      walletBankId: account.bank?.id || null,
+      walletActive: true,
+      walletCurrency: "NGN",
+      dedicatedAccountId: account.account_reference,
     })
-
-    accessToken = response.data.access_token
-    const expiresIn = response.data.expires_in || 600 // Default 10 minutes
-    tokenExpiresAt = now + expiresIn * 1000
-
-    console.log("✅ OAuth token refreshed successfully")
-    console.log(`   Token expires in: ${expiresIn} seconds`)
-    
-    return accessToken
-  } catch (error) {
-    console.error("❌ OAuth token refresh failed:", error.response?.data || error.message)
-    throw new Error("Failed to obtain Flutterwave access token")
   }
+
+  return { success: true, account }
 }
 
 /**
- * Helper function to make authenticated Flutterwave API calls
- */
-const flutterwaveRequest = async (method, endpoint, data = null) => {
-  try {
-    // Get valid access token
-    const token = await getAccessToken()
-
-    const config = {
-      method,
-      url: `${FLUTTERWAVE_BASE_URL}${endpoint}`,
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-      },
-    }
-
-    if (data) {
-      config.data = data
-    }
-
-    const response = await axios(config)
-    return response.data
-  } catch (error) {
-    console.error("❌ Flutterwave API Error:")
-    console.error("Status:", error.response?.status)
-    console.error("Full Response:", JSON.stringify(error.response?.data, null, 2))
-    
-    // Log validation errors in detail
-    if (error.response?.data?.error?.validation_errors) {
-      console.error("\n📋 Validation Errors Detail:")
-      error.response.data.error.validation_errors.forEach((err, index) => {
-        console.error(`  ${index + 1}.`, JSON.stringify(err, null, 2))
-      })
-    }
-    
-    // If token expired, clear cache and retry once
-    if (error.response?.status === 401 && accessToken) {
-      console.log("🔄 Token might be expired, retrying with fresh token...")
-      accessToken = null
-      tokenExpiresAt = 0
-      
-      // Retry once with fresh token
-      const token = await getAccessToken()
-      const config = {
-        method,
-        url: `${FLUTTERWAVE_BASE_URL}${endpoint}`,
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
-      }
-      if (data) config.data = data
-      
-      try {
-        const response = await axios(config)
-        return response.data
-      } catch (retryError) {
-        console.error("Retry failed:", retryError.response?.data || retryError.message)
-        throw new Error(retryError.response?.data?.message || "Flutterwave API request failed")
-      }
-    }
-    
-    throw new Error(error.response?.data?.message || "Flutterwave API request failed")
-  }
-}
-
-// Removed Flutterwave-specific wallet creation and helpers
-
-/**
- * Get user's wallet details
+ * Get wallet information
  */
 export const getWallet = async (req, res) => {
-  const userId = req.user.id
-
   try {
+    const userId = req.user.id
+
     const user = await findUserById(userId)
     if (!user) {
       return res.status(404).json({ message: "User not found" })
     }
 
-    if (!user.walletAccountNumber) {
-      return res.status(404).json({ message: "No wallet found for this user" })
-    }
-
-    // Get wallet balance
+    // Get wallet balance (calculated from transactions)
     const balance = await getWalletBalance(userId)
 
+    // Return wallet info - virtual account details are optional now (using Paystack directly)
     return res.status(200).json({
       wallet: {
-        accountNumber: user.walletAccountNumber,
-        accountName: user.walletAccountName,
-        bankName: user.walletBankName,
-        currency: user.walletCurrency || "NGN",
-        active: user.walletActive,
-        balance: balance || 0,
+        balance: balance,
+        accountNumber: user.walletAccountNumber || null,
+        accountName: user.walletAccountName || null,
+        bankName: user.walletBankName || null,
       },
     })
   } catch (error) {
     console.error("Get wallet error:", error)
     return res.status(500).json({
-      message: "Server error fetching wallet details",
+      message: "Server error fetching wallet",
       error: error.message,
     })
   }
 }
-
-/**
- * Fetch available currencies for virtual accounts
- */
-// Removed Flutterwave available banks
 
 /**
  * Get wallet transaction history
@@ -272,9 +169,8 @@ export const getTransactionHistory = async (req, res) => {
       return res.status(404).json({ message: "User not found" })
     }
 
-    if (!user.walletAccountNumber) {
-      return res.status(404).json({ message: "No wallet found for this user" })
-    }
+    // Removed walletAccountNumber check - wallet transactions exist independently
+    // Users can have transactions even without a virtual account number
 
     const pageNum = Number(page) || 1
     const limitNum = Number(limit) || 20
@@ -299,172 +195,81 @@ export const getTransactionHistory = async (req, res) => {
   }
 }
 
-/**
- * Webhook handler for Flutterwave events
- * This endpoint receives notifications when funds are transferred to the virtual account
- */
-// Removed Flutterwave webhook
-
-/**
- * Get all virtual accounts for a user (if multiple accounts exist)
- */
-// Removed Flutterwave list virtual accounts
-
-// Removed Flutterwave get virtual account by ID
-
-/**
- * Create a new virtual account with extended expiry
- * Note: Flutterwave does not allow updating expiry of existing accounts
- */
-// Removed Flutterwave extended virtual account creation
-
-/**
- * Force create a new wallet (for expired accounts)
- */
-// Removed Flutterwave force create
-
-/**
- * Check virtual account expiry status
- */
-// Removed Flutterwave expiry check
-
-// ===================== KoraPay NGN Virtual Bank Accounts =====================
-
-/**
- * Create NGN Virtual Bank Account (KoraPay)
- * Requires: account_name, account_reference, permanent=true, bank_code, customer{name,email}, kyc{bvn,[nin]}
- */
+// KoraPay functions (stubs - implement as needed)
 export const korapayCreateVBA = async (req, res) => {
   try {
-    const userId = req.user?.id
-    const user = userId ? await findUserById(userId) : null
-
-    const {
-      account_name,
-      account_reference,
-      permanent = true,
-      bank_code = "000",
-      customer,
-      kyc,
-    } = req.body || {}
-
-    if (!KORAPAY_SECRET_KEY) {
-      return res.status(500).json({ message: "KoraPay secret key not configured" })
-    }
-
-    if (!account_name || !account_reference || typeof permanent !== "boolean" || !bank_code || !customer || !customer.name || !kyc || !kyc.bvn) {
-      return res.status(400).json({ message: "Missing required fields for KoraPay VBA creation" })
-    }
-
-    // Ensure a stable, unique reference; if user present, prefix with userId
-    const finalReference = userId ? `${account_reference}-${userId}` : account_reference
-
-    const payload = {
-      account_name,
-      account_reference: finalReference,
-      permanent: Boolean(permanent),
-      bank_code,
-      customer: {
-        name: customer.name,
-        ...(customer.email ? { email: customer.email } : {}),
-      },
-      kyc: {
-        bvn: kyc.bvn,
-        ...(kyc.nin ? { nin: kyc.nin } : {}),
-      },
-    }
-
-    const data = await korapayRequest("POST", "/virtual-bank-account", payload)
-    return res.status(201).json(data)
+    const userId = req.user.id
+    const result = await createKorapayWalletForUser(userId)
+    return res.json(result)
   } catch (error) {
     return res.status(500).json({ message: error.message })
   }
 }
 
-/**
- * Retrieve NGN Virtual Bank Account by account_reference (KoraPay)
- */
 export const korapayGetVBA = async (req, res) => {
   try {
     const { accountReference } = req.params
-    if (!accountReference) return res.status(400).json({ message: "accountReference is required" })
-    // Try exact reference first
-    try {
-      const data = await korapayRequest("GET", `/virtual-bank-account/${encodeURIComponent(accountReference)}`)
-      return res.json(data)
-    } catch (e) {
-      // If the reference was created with userId suffix, try appending it
-      const userId = req.user?.id
-      if (userId && !accountReference.includes("-")) {
-        try {
-          const withUser = `${accountReference}-${userId}`
-          const data2 = await korapayRequest("GET", `/virtual-bank-account/${encodeURIComponent(withUser)}`)
-          return res.json(data2)
-        } catch (e2) {
-          // fall through
-        }
-      }
-      throw e
-    }
+    const data = await korapayRequest("GET", `/virtual-bank-account/${accountReference}`)
+    return res.json(data)
   } catch (error) {
     return res.status(500).json({ message: error.message })
   }
 }
 
-/**
- * Webhook for KoraPay (charge.success)
- * We verify the payment using charges/:reference before crediting the wallet
- */
 export const korapayWebhook = async (req, res) => {
   try {
     const { event, data } = req.body || {}
     if (!event || !data) return res.status(400).json({ message: "Invalid webhook payload" })
 
     if (event === "charge.success") {
-      const reference = data.reference
+      const reference = data.reference || data.payment_reference
       if (!reference) return res.status(200).json({ message: "No reference to verify" })
 
-      // Verify charge
-      let charge
-      try {
-        charge = await korapayRequest("GET", `/charges/${encodeURIComponent(reference)}`)
-      } catch (e) {
-        console.error("Failed to verify KoraPay charge:", e.message)
-        return res.status(200).json({ message: "received" })
-      }
-
-      const status = charge?.data?.status || charge?.data?.data?.status || charge?.status
-      if (status !== "success") {
-        return res.status(200).json({ message: "Charge not successful" })
-      }
-
-      const amount = Number(charge?.data?.amount_paid || charge?.data?.amount || data.amount || 0)
-      const currency = charge?.data?.currency || data.currency || "NGN"
-
-      // Extract userId from account_reference if present (format we set: <ref>-<userId>)
-      const accountReference = data?.virtual_bank_account_details?.virtual_bank_account?.account_reference || charge?.data?.virtual_bank_account?.account_reference
+      // Extract userId from reference or lookup pending transaction
       let userIdFromRef = null
-      if (accountReference && accountReference.includes("-")) {
-        const parts = accountReference.split("-")
-        const last = parts[parts.length - 1]
-        if (/^\d+$/.test(last)) userIdFromRef = parseInt(last, 10)
+      if (reference && reference.startsWith("HOLAGE-") && reference.includes("-")) {
+        const parts = reference.split("-")
+        if (parts.length >= 3) {
+          const last = parts[parts.length - 1]
+          if (/^\d+$/.test(last)) userIdFromRef = parseInt(last, 10)
+        }
+      }
+
+      if (!userIdFromRef) {
+        try {
+          const [rows] = await pool.query(
+            `SELECT userId FROM wallet_transactions WHERE reference = ? AND status = 'pending' LIMIT 1`,
+            [reference]
+          )
+          if (rows && rows.length > 0) {
+            userIdFromRef = rows[0].userId
+          }
+        } catch (e) {
+          console.error("Error looking up reference:", e.message)
+        }
       }
 
       if (userIdFromRef) {
         try {
+          const amount = Number(data.amount || data.amount_paid || 0) / 100
+          const currency = data.currency || "NGN"
           await createWalletTransaction(userIdFromRef, {
             reference,
             amount,
             currency,
             type: "credit",
             status: "success",
-            description: "Wallet funding via KoraPay VBA",
+            description: "Wallet funding via KoraPay",
             paystackReference: reference,
-            metadata: JSON.stringify({ webhook: req.body, verified: charge }),
+            metadata: JSON.stringify({ webhook: req.body, verified: charge, source: "checkout_standard" }),
           })
-          console.log(`Wallet credited for user ${userIdFromRef}: ${amount} ${currency}`)
+          console.log(`✅ Wallet credited for user ${userIdFromRef}: ${amount} ${currency} (ref: ${reference})`)
         } catch (e) {
-          console.error("Failed to record wallet transaction:", e.message)
+          if (e?.code === 'ER_DUP_ENTRY') {
+            console.log(`⚠️ Duplicate transaction for reference ${reference}, skipping`)
+          } else {
+            throw e
+          }
         }
       }
     }
@@ -476,13 +281,9 @@ export const korapayWebhook = async (req, res) => {
   }
 }
 
-/**
- * Query a KoraPay charge by reference
- */
 export const korapayGetCharge = async (req, res) => {
   try {
     const { reference } = req.params
-    if (!reference) return res.status(400).json({ message: "reference is required" })
     const data = await korapayRequest("GET", `/charges/${encodeURIComponent(reference)}`)
     return res.json(data)
   } catch (error) {
@@ -490,20 +291,14 @@ export const korapayGetCharge = async (req, res) => {
   }
 }
 
-/**
- * List transactions for a KoraPay virtual bank account (account_number required)
- * Query params: account_number (required), start_date, end_date, page, limit
- */
 export const korapayListVBATransactions = async (req, res) => {
   try {
     const { account_number, start_date, end_date, page, limit } = req.query
-    if (!account_number) return res.status(400).json({ message: "account_number is required" })
-    const params = { account_number }
-    if (start_date) params.start_date = start_date
-    if (end_date) params.end_date = end_date
-    if (page) params.page = page
-    if (limit) params.limit = limit
+    if (!account_number) {
+      return res.status(400).json({ message: "account_number is required" })
+    }
 
+    const params = { account_number, ...(start_date ? { start_date } : {}), ...(end_date ? { end_date } : {}), ...(page ? { page } : {}), ...(limit ? { limit } : {}) }
     const data = await korapayRequest("GET", "/virtual-bank-account/transactions", null, params)
     return res.json(data)
   } catch (error) {
@@ -511,26 +306,33 @@ export const korapayListVBATransactions = async (req, res) => {
   }
 }
 
-/**
- * Sandbox credit VBA (KoraPay)
- * Body: account_number, currency="NGN", amount
- */
 export const korapaySandboxCredit = async (req, res) => {
   try {
-    const { account_number, currency = "NGN", amount } = req.body || {}
-    if (!account_number || !amount) return res.status(400).json({ message: "account_number and amount are required" })
-    const payload = { account_number, currency, amount }
-    const data = await korapayRequest("POST", "/virtual-bank-account/sandbox/credit", payload)
-    return res.status(201).json(data)
+    const userId = req.user.id
+    const { amount, currency = "NGN" } = req.body || {}
+    if (!amount) {
+      return res.status(400).json({ message: "amount is required" })
+    }
+
+    const reference = `SANDBOX-${Date.now()}-${userId}`
+    await createWalletTransaction(userId, {
+      reference,
+      amount: Number(amount),
+      currency,
+      type: "credit",
+      status: "success",
+      description: "Sandbox credit",
+      paystackReference: reference,
+      metadata: JSON.stringify({ source: "sandbox" }),
+    })
+
+    const balance = await getWalletBalance(userId)
+    return res.json({ message: "Sandbox credit successful", balance })
   } catch (error) {
     return res.status(500).json({ message: error.message })
   }
 }
 
-/**
- * Initiate a one-time bank transfer (KoraPay) to generate a temporary account
- * Body: account_name, amount, currency, reference, customer{name,email}
- */
 export const korapayInitiateBankTransfer = async (req, res) => {
   try {
     const userId = req.user?.id
@@ -571,10 +373,6 @@ export const korapayInitiateBankTransfer = async (req, res) => {
   }
 }
 
-/**
- * Confirm a charge by reference and credit user's wallet on success
- * Path: :reference
- */
 export const korapayConfirmChargeAndCredit = async (req, res) => {
   try {
     const userId = req.user?.id
@@ -619,3 +417,622 @@ export const korapayConfirmChargeAndCredit = async (req, res) => {
   }
 }
 
+export const korapayInitiateCheckout = async (req, res) => {
+  try {
+    const userId = req.user?.id
+    if (!userId) return res.status(401).json({ message: "Unauthorized" })
+
+    const { amount, currency = "NGN" } = req.body || {}
+    if (!amount || amount < 100) {
+      return res.status(400).json({ message: "Amount is required and must be at least 100" })
+    }
+
+    const user = await findUserById(userId)
+    if (!user) {
+      return res.status(404).json({ message: "User not found" })
+    }
+
+    if (!user.email || !user.email.includes('@')) {
+      return res.status(400).json({ message: "Valid email address is required. Please update your profile." })
+    }
+
+    const timestamp = Date.now()
+    const reference = `KPY-${timestamp}-${userId}`.substring(0, 100)
+
+    // Store reference mapping in database (for webhook lookup)
+    try {
+      await pool.query(
+        `INSERT INTO wallet_transactions (userId, reference, amount, currency, type, status, description, createdAt)
+         VALUES (?, ?, ?, ?, 'credit', 'pending', 'Wallet funding via Kora Checkout Standard', NOW())
+         ON DUPLICATE KEY UPDATE reference = reference`,
+        [userId, reference, amount, currency]
+      )
+    } catch (e) {
+      if (e?.code !== 'ER_DUP_ENTRY') {
+        console.error("Error storing reference:", e.message)
+      }
+    }
+
+    const baseUrl = process.env.VITE_API_URL 
+      ? process.env.VITE_API_URL.replace('/api', '')
+      : (process.env.API_BASE_URL || process.env.BASE_URL || "http://localhost:4000")
+    const notificationUrl = `${baseUrl}/api/wallet/korapay/webhook`
+
+    // Ensure amount is an integer (Kora requires integer amounts)
+    const amountInt = Math.round(Number(amount))
+
+    const checkoutData = {
+      key: KORAPAY_PUBLIC_KEY,
+      reference,
+      amount: amountInt,
+      currency,
+      customer: {
+        name: user.fullName || "User",
+        email: user.email.trim(),
+      },
+      notification_url: notificationUrl,
+    }
+
+    return res.json({
+      success: true,
+      ...checkoutData,
+    })
+  } catch (error) {
+    console.error("Error initiating Kora Checkout:", error)
+    return res.status(500).json({ message: error.message || "Failed to initiate checkout" })
+  }
+}
+
+/**
+ * Initialize Paystack payment
+ */
+export const paystackInitiatePayment = async (req, res) => {
+  try {
+    const userId = req.user?.id
+    const { amount, currency = "NGN" } = req.body || {}
+
+    if (!amount || amount < 100) {
+      return res.status(400).json({ message: "Amount is required and must be at least 100" })
+    }
+
+    if (!PAYSTACK_SECRET_KEY || !PAYSTACK_PUBLIC_KEY) {
+      return res.status(500).json({ message: "Paystack public key not configured" })
+    }
+
+    // Get user details
+    const user = await findUserById(userId)
+    if (!user) {
+      return res.status(404).json({ message: "User not found" })
+    }
+
+    // Validate customer email (required by Paystack)
+    if (!user.email || !user.email.includes('@')) {
+      return res.status(400).json({ message: "Valid email address is required. Please update your profile." })
+    }
+
+    // Generate unique reference
+    const timestamp = Date.now()
+    const reference = `HOLAGE-${timestamp}-${userId}`.substring(0, 100)
+
+    // Store reference mapping in database (for webhook lookup)
+    try {
+      await pool.query(
+        `INSERT INTO wallet_transactions (userId, reference, amount, currency, type, status, description, createdAt)
+         VALUES (?, ?, ?, ?, 'credit', 'pending', 'Wallet funding via Paystack', NOW())
+         ON DUPLICATE KEY UPDATE reference = reference`,
+        [userId, reference, amount, currency]
+      )
+    } catch (e) {
+      if (e?.code !== 'ER_DUP_ENTRY') {
+        console.error("Error storing reference:", e.message)
+      }
+    }
+
+    // Construct callback URL
+    const baseUrl = process.env.VITE_API_URL 
+      ? process.env.VITE_API_URL.replace('/api', '')
+      : (process.env.API_BASE_URL || process.env.BASE_URL || "http://localhost:4000")
+    const callbackUrl = `${baseUrl}/api/wallet/paystack/callback`
+
+    const paymentData = {
+      success: true,
+      publicKey: PAYSTACK_PUBLIC_KEY,
+      reference,
+      amount: Math.round(Number(amount)) * 100, // Paystack uses amount in kobo (smallest currency unit)
+      currency,
+      email: user.email.trim(),
+      name: (user.fullName || "User").trim(),
+      callbackUrl
+    }
+
+    console.log('Paystack payment initiated:', {
+      reference,
+      amount: paymentData.amount,
+      currency,
+      email: user.email,
+      callbackUrl
+    })
+
+    return res.json(paymentData)
+  } catch (error) {
+    console.error("Error initiating Paystack payment:", error)
+    return res.status(500).json({ message: error.message || "Failed to initiate payment" })
+  }
+}
+
+/**
+ * Paystack webhook handler
+ */
+export const paystackWebhook = async (req, res) => {
+  try {
+    const { event, data } = req.body || {}
+    
+    if (event === "charge.success") {
+      const reference = data.reference
+      const amount = data.amount / 100 // Convert from kobo to NGN
+      const currency = data.currency || "NGN"
+      const customerEmail = data.customer?.email
+
+      if (!reference) {
+        return res.status(200).json({ message: "No reference" })
+      }
+
+      // Extract userId from reference (format: HOLAGE-<timestamp>-<userId>)
+      let userIdFromRef = null
+      if (reference && reference.startsWith("HOLAGE-") && reference.includes("-")) {
+        const parts = reference.split("-")
+        if (parts.length >= 3) {
+          const last = parts[parts.length - 1]
+          if (/^\d+$/.test(last)) userIdFromRef = parseInt(last, 10)
+        }
+      }
+
+      // If not found in reference, try to find from pending transaction
+      if (!userIdFromRef) {
+        try {
+          const [rows] = await pool.query(
+            `SELECT userId FROM wallet_transactions WHERE reference = ? AND status = 'pending' LIMIT 1`,
+            [reference]
+          )
+          if (rows && rows.length > 0) {
+            userIdFromRef = rows[0].userId
+          }
+        } catch (e) {
+          console.error("Error looking up reference:", e.message)
+        }
+      }
+
+      if (userIdFromRef) {
+        try {
+          await createWalletTransaction(userIdFromRef, {
+            reference,
+            amount,
+            currency,
+            type: "credit",
+            status: "success",
+            description: "Wallet funding via Paystack",
+            paystackReference: reference,
+            metadata: JSON.stringify({ webhook: req.body, source: "paystack" }),
+          })
+          console.log(`✅ Wallet credited for user ${userIdFromRef}: ${amount} ${currency} (ref: ${reference})`)
+        } catch (e) {
+          if (e?.code === 'ER_DUP_ENTRY') {
+            console.log(`⚠️ Duplicate transaction for reference ${reference}, skipping`)
+          } else {
+            console.error("Failed to record wallet transaction:", e.message)
+          }
+        }
+      } else {
+        console.warn(`⚠️ Could not determine userId for reference: ${reference}`)
+      }
+    }
+
+    return res.status(200).json({ message: "received" })
+  } catch (error) {
+    console.error("Paystack webhook error:", error)
+    return res.status(500).json({ message: "Webhook processing failed" })
+  }
+}
+
+/**
+ * Verify Paystack payment and credit wallet
+ * Query params: reference (required)
+ */
+export const verifyPaystackPayment = async (req, res) => {
+  try {
+    const { reference } = req.query || {}
+    const userId = req.user?.id
+
+    console.log(`🔍 Verifying Paystack payment - Reference: ${reference}, UserId: ${userId}`)
+
+    if (!userId) {
+      console.error('❌ Verification failed: No userId')
+      return res.status(401).json({ message: "Unauthorized" })
+    }
+
+    if (!reference) {
+      console.error('❌ Verification failed: No reference provided')
+      return res.status(400).json({ message: "Payment reference is required" })
+    }
+
+    if (!PAYSTACK_SECRET_KEY) {
+      console.error('❌ Verification failed: Paystack secret key not configured')
+      return res.status(500).json({ message: "Paystack secret key not configured" })
+    }
+
+    // Verify payment with Paystack
+    console.log(`📞 Calling Paystack API to verify transaction: ${reference}`)
+    const verification = await paystackRequest("GET", `/transaction/verify/${reference}`)
+    console.log(`📥 Paystack verification response:`, {
+      status: verification.status,
+      hasData: !!verification.data,
+      transactionStatus: verification.data?.status
+    })
+
+    if (!verification.status || !verification.data) {
+      console.error('❌ Verification failed: Invalid response from Paystack', verification)
+      return res.status(400).json({ 
+        message: "Payment verification failed", 
+        error: verification.message || "Invalid payment reference" 
+      })
+    }
+
+    const paymentData = verification.data
+    const amount = paymentData.amount / 100 // Convert from kobo to NGN
+    const currency = paymentData.currency || "NGN"
+    const paymentStatus = paymentData.status
+
+    console.log(`💰 Payment details: Amount: ${amount} ${currency}, Status: ${paymentStatus}`)
+
+    // Check if payment was successful
+    if (paymentStatus !== "success") {
+      console.warn(`⚠️ Payment not successful. Status: ${paymentStatus}, Reference: ${reference}`)
+      return res.status(400).json({ 
+        message: `Payment not successful. Status: ${paymentStatus}`,
+        status: paymentStatus
+      })
+    }
+
+    // Check if transaction already exists
+    try {
+      const [existing] = await pool.query(
+        `SELECT id FROM wallet_transactions WHERE reference = ? AND status = 'success' LIMIT 1`,
+        [reference]
+      )
+
+      if (existing && existing.length > 0) {
+        // Transaction already processed, just return current balance
+        console.log(`ℹ️ Transaction ${reference} already processed, returning current balance`)
+        const balance = await getWalletBalance(userId)
+        return res.json({
+          success: true,
+          message: "Payment already processed",
+          balance,
+          transaction: { reference, amount, currency, status: "success" }
+        })
+      }
+    } catch (checkError) {
+      console.error("❌ Error checking existing transaction:", checkError)
+    }
+
+    // Credit wallet
+    try {
+      console.log(`💳 Creating wallet transaction for user ${userId}: ${amount} ${currency}`)
+      await createWalletTransaction(userId, {
+        reference,
+        amount,
+        currency,
+        type: "credit",
+        status: "success",
+        description: "Wallet funding via Paystack",
+        paystackReference: reference,
+        metadata: JSON.stringify({ 
+          verification: verification.data, 
+          source: "paystack_verify",
+          verifiedAt: new Date().toISOString()
+        }),
+      })
+
+      const balance = await getWalletBalance(userId)
+
+      console.log(`✅ Wallet credited via verification for user ${userId}: ${amount} ${currency} (ref: ${reference})`)
+      console.log(`💰 New wallet balance: ${balance} ${currency}`)
+
+      return res.json({
+        success: true,
+        message: "Payment verified and wallet credited",
+        balance,
+        transaction: {
+          reference,
+          amount,
+          currency,
+          status: "success"
+        }
+      })
+    } catch (creditError) {
+      console.error(`❌ Error crediting wallet:`, creditError)
+      if (creditError?.code === 'ER_DUP_ENTRY') {
+        // Duplicate entry, payment was already processed
+        console.log(`ℹ️ Duplicate transaction detected, returning current balance`)
+        const balance = await getWalletBalance(userId)
+        return res.json({
+          success: true,
+          message: "Payment already processed",
+          balance,
+          transaction: { reference, amount, currency, status: "success" }
+        })
+      }
+      throw creditError
+    }
+  } catch (error) {
+    console.error("Error verifying Paystack payment:", error)
+    return res.status(500).json({ message: error.message || "Failed to verify payment" })
+  }
+}
+
+/**
+ * Credit wallet directly from Paystack callback (simplified - no verification)
+ * Body: reference
+ */
+export const creditWalletFromPaystackCallback = async (req, res) => {
+  try {
+    const { reference } = req.body || {}
+    const userId = req.user?.id
+
+    console.log(`💰 Crediting wallet from Paystack callback - Reference: ${reference}, UserId: ${userId}`)
+
+    if (!userId) {
+      console.error('❌ No userId')
+      return res.status(401).json({ message: "Unauthorized" })
+    }
+
+    if (!reference) {
+      console.error('❌ No reference provided')
+      return res.status(400).json({ message: "Payment reference is required" })
+    }
+
+    // Find pending transaction for this reference
+    const [pendingTx] = await pool.query(
+      `SELECT userId, amount, currency, reference FROM wallet_transactions 
+       WHERE reference = ? AND status = 'pending' LIMIT 1`,
+      [reference]
+    )
+
+    if (!pendingTx || pendingTx.length === 0) {
+      console.error(`❌ No pending transaction found for reference: ${reference}`)
+      return res.status(404).json({ message: "Pending transaction not found" })
+    }
+
+    const pendingTransaction = pendingTx[0]
+    
+    // Verify the transaction belongs to this user
+    if (pendingTransaction.userId !== userId) {
+      console.error(`❌ Transaction belongs to different user`)
+      return res.status(403).json({ message: "Transaction does not belong to this user" })
+    }
+
+    const amount = parseFloat(pendingTransaction.amount || 0)
+    const currency = pendingTransaction.currency || "NGN"
+
+    // Check if already processed
+    const [existing] = await pool.query(
+      `SELECT id FROM wallet_transactions WHERE reference = ? AND status = 'success' LIMIT 1`,
+      [reference]
+    )
+
+    if (existing && existing.length > 0) {
+      console.log(`ℹ️ Transaction ${reference} already processed`)
+      const balance = await getWalletBalance(userId)
+      return res.json({
+        success: true,
+        message: "Payment already processed",
+        balance,
+        transaction: { reference, amount, currency, status: "success" }
+      })
+    }
+
+    // Credit wallet - Update existing pending transaction to success instead of creating new one
+    try {
+      console.log(`💳 Crediting wallet for user ${userId}: ${amount} ${currency}`)
+      
+      // Update the existing pending transaction to success
+      await pool.query(
+        `UPDATE wallet_transactions 
+         SET status = 'success', 
+             description = 'Wallet funding via Paystack',
+             paystackReference = ?,
+             metadata = ?,
+             updatedAt = NOW()
+         WHERE reference = ? AND status = 'pending'`,
+        [
+          reference,
+          JSON.stringify({ 
+            source: "paystack_callback",
+            creditedAt: new Date().toISOString()
+          }),
+          reference
+        ]
+      )
+      
+      // Check if update was successful
+      const [updated] = await pool.query(
+        `SELECT id FROM wallet_transactions WHERE reference = ? AND status = 'success' LIMIT 1`,
+        [reference]
+      )
+      
+      if (!updated || updated.length === 0) {
+        throw new Error("Failed to update transaction status")
+      }
+      
+      console.log(`✅ Transaction updated to success for reference: ${reference}`)
+
+      const balance = await getWalletBalance(userId)
+
+      console.log(`✅ Wallet credited for user ${userId}: ${amount} ${currency} (ref: ${reference})`)
+      console.log(`💰 New wallet balance: ${balance} ${currency}`)
+
+      return res.json({
+        success: true,
+        message: "Wallet credited successfully",
+        balance,
+        transaction: {
+          reference,
+          amount,
+          currency,
+          status: "success"
+        }
+      })
+    } catch (creditError) {
+      console.error(`❌ Error crediting wallet:`, creditError)
+      
+      // If transaction was already updated (race condition), return success
+      const [check] = await pool.query(
+        `SELECT id FROM wallet_transactions WHERE reference = ? AND status = 'success' LIMIT 1`,
+        [reference]
+      )
+      
+      if (check && check.length > 0) {
+        console.log(`ℹ️ Transaction ${reference} was already processed (race condition)`)
+        const balance = await getWalletBalance(userId)
+        return res.json({
+          success: true,
+          message: "Payment already processed",
+          balance,
+          transaction: { reference, amount, currency, status: "success" }
+        })
+      }
+      
+      throw creditError
+    }
+  } catch (error) {
+    console.error("Error crediting wallet from callback:", error)
+    return res.status(500).json({ message: error.message || "Failed to credit wallet" })
+  }
+}
+
+/**
+ * Transfer money to a bank account using Paystack Transfer API
+ */
+export const paystackTransferToBank = async (req, res) => {
+  try {
+    const { accountNumber, bankCode, bankName, amount, reason, recipientCode } = req.body || {}
+    
+    if (!amount || amount < 100) {
+      return res.status(400).json({ message: "Amount is required and must be at least 100" })
+    }
+
+    if (!PAYSTACK_SECRET_KEY) {
+      return res.status(500).json({ message: "Paystack secret key not configured" })
+    }
+
+    // If recipientCode is provided, use it directly
+    if (recipientCode) {
+      const transferData = {
+        source: "balance",
+        amount: Math.round(Number(amount)) * 100,
+        recipient: recipientCode,
+        reason: reason || "Payment for shipment",
+        currency: "NGN"
+      }
+
+      const result = await paystackRequest("POST", "/transfer", transferData)
+      return res.json({ success: true, transfer: result })
+    }
+
+    // Otherwise, create recipient first, then transfer
+    if (!accountNumber) {
+      return res.status(400).json({ message: "accountNumber is required (or provide recipientCode)" })
+    }
+
+    let finalBankCode = bankCode
+
+    // If bankCode is not provided but bankName is, fetch bank code from Paystack
+    if (!finalBankCode && bankName) {
+      try {
+        const banksResponse = await paystackRequest("GET", "/bank?country=nigeria")
+        if (banksResponse.status && banksResponse.data) {
+          const bank = banksResponse.data.find(
+            b => b.name.toLowerCase() === bankName.toLowerCase() || 
+                 b.slug.toLowerCase() === bankName.toLowerCase()
+          )
+          if (bank) {
+            finalBankCode = bank.code
+          }
+        }
+      } catch (e) {
+        console.error("Error fetching bank code:", e.message)
+      }
+    }
+
+    if (!finalBankCode) {
+      return res.status(400).json({ message: "bankCode is required (or provide bankName to auto-fetch)" })
+    }
+
+    // Create transfer recipient
+    const recipientData = {
+      type: "nuban",
+      name: req.user?.fullName || "Recipient",
+      account_number: accountNumber,
+      bank_code: finalBankCode,
+      currency: "NGN"
+    }
+
+    const recipientResponse = await paystackRequest("POST", "/transferrecipient", recipientData)
+
+    if (!recipientResponse.status || !recipientResponse.data) {
+      return res.status(400).json({ 
+        message: "Failed to create transfer recipient",
+        error: recipientResponse.message 
+      })
+    }
+
+    // Perform transfer
+    const transferData = {
+      source: "balance",
+      amount: Math.round(Number(amount)) * 100,
+      recipient: recipientResponse.data.recipient_code,
+      reason: reason || "Payment for shipment",
+      currency: "NGN"
+    }
+
+    const transferResponse = await paystackRequest("POST", "/transfer", transferData)
+
+    return res.json({ 
+      success: true, 
+      transfer: transferResponse,
+      recipient: recipientResponse.data
+    })
+  } catch (error) {
+    console.error("Error transferring to bank:", error)
+    return res.status(500).json({ message: error.message || "Failed to transfer funds" })
+  }
+}
+
+/**
+ * Get list of Nigerian banks from Paystack
+ */
+export const getPaystackBanks = async (req, res) => {
+  try {
+    if (!PAYSTACK_SECRET_KEY) {
+      return res.status(500).json({ message: "Paystack secret key not configured" })
+    }
+
+    const banksResponse = await paystackRequest("GET", "/bank?country=nigeria")
+    
+    if (banksResponse.status && banksResponse.data) {
+      const banks = banksResponse.data.map(bank => ({
+        name: bank.name,
+        code: bank.code,
+        slug: bank.slug,
+        longcode: bank.longcode
+      }))
+      
+      return res.json({ success: true, banks })
+    } else {
+      return res.status(400).json({ message: "Failed to fetch banks", error: banksResponse.message })
+    }
+  } catch (error) {
+    console.error("Error fetching Paystack banks:", error)
+    return res.status(500).json({ message: error.message || "Failed to fetch banks" })
+  }
+}

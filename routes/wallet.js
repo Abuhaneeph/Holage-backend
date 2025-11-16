@@ -11,6 +11,14 @@ import {
   korapaySandboxCredit,
   korapayInitiateBankTransfer,
   korapayConfirmChargeAndCredit,
+  korapayInitiateCheckout,
+  // Paystack
+  paystackInitiatePayment,
+  paystackWebhook,
+  paystackTransferToBank,
+  getPaystackBanks,
+  verifyPaystackPayment,
+  creditWalletFromPaystackCallback,
 } from "../controllers/walletController.js"
 import {
   opayCreateWallet,
@@ -39,7 +47,16 @@ router.get("/korapay/charges/:reference", authenticate, korapayGetCharge)
 router.post("/korapay/charges/bank-transfer", authenticate, korapayInitiateBankTransfer)
 router.post("/korapay/charges/:reference/confirm", authenticate, korapayConfirmChargeAndCredit)
 router.post("/korapay/sandbox/credit", authenticate, korapaySandboxCredit)
+router.post("/korapay/checkout/initiate", authenticate, korapayInitiateCheckout)
 router.post("/korapay/webhook", korapayWebhook)
+
+// Paystack
+router.post("/paystack/initiate", authenticate, paystackInitiatePayment)
+router.get("/paystack/verify", authenticate, verifyPaystackPayment) // Verify payment and credit wallet
+router.post("/paystack/credit", authenticate, creditWalletFromPaystackCallback) // Credit wallet directly from callback
+router.post("/paystack/webhook", paystackWebhook)
+router.post("/paystack/transfer", authenticate, paystackTransferToBank)
+router.get("/paystack/banks", getPaystackBanks) // Public endpoint to get bank list
 
 // OPay Digital Wallets
 router.post("/opay/wallet/create", authenticate, opayCreateWallet)

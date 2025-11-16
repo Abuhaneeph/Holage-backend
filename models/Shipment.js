@@ -15,6 +15,7 @@ export const createShipment = async (shipmentData) => {
     truckType,
     pickupDate,
     fragileItems,
+    insurance,
     distance,
     estimatedCost,
     estimatedDuration
@@ -23,9 +24,9 @@ export const createShipment = async (shipmentData) => {
   const query = `
     INSERT INTO shipments 
     (shipperId, pickupState, pickupLga, destinationState, destinationLga, cargoType, weight, truckType, 
-     pickupDate, fragileItems, distance, estimatedCost, estimatedDuration, 
+     pickupDate, fragileItems, insurance, distance, estimatedCost, estimatedDuration, 
      status, createdAt)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NOW())
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NOW())
   `
   
   const [result] = await pool.execute(query, [
@@ -39,6 +40,7 @@ export const createShipment = async (shipmentData) => {
     truckType || null,
     pickupDate || null,
     fragileItems ? 1 : 0,
+    insurance ? 1 : 0,
     distance || null,
     estimatedCost || null,
     estimatedDuration || null
@@ -81,21 +83,40 @@ export const getShipmentsByShipperId = async (shipperId, limit = 20, offset = 0)
 
 /**
  * Get all available shipments for truckers (not yet assigned)
+ * Supports filtering by pickupState, destinationState, and truckType
  */
-export const getAvailableShipments = async (limit = 20, offset = 0) => {
+export const getAvailableShipments = async (limit = 20, offset = 0, filters = {}) => {
   // Ensure limit and offset are integers
   const limitInt = parseInt(limit, 10)
   const offsetInt = parseInt(offset, 10)
   
-  const query = `
+  let query = `
     SELECT s.*, u.fullName as shipperName, u.phone as shipperPhone
     FROM shipments s
     LEFT JOIN users u ON s.shipperId = u.id
     WHERE s.status = 'pending' AND s.truckerId IS NULL
-    ORDER BY s.createdAt DESC 
-    LIMIT ${limitInt} OFFSET ${offsetInt}
   `
-  const [rows] = await pool.execute(query, [])
+  const params = []
+  
+  // Add filters
+  if (filters.pickupState) {
+    query += ` AND s.pickupState = ?`
+    params.push(filters.pickupState)
+  }
+  
+  if (filters.destinationState) {
+    query += ` AND s.destinationState = ?`
+    params.push(filters.destinationState)
+  }
+  
+  if (filters.truckType) {
+    query += ` AND s.truckType = ?`
+    params.push(filters.truckType)
+  }
+  
+  query += ` ORDER BY s.createdAt DESC LIMIT ${limitInt} OFFSET ${offsetInt}`
+  
+  const [rows] = await pool.execute(query, params)
   return rows
 }
 
