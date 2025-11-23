@@ -11,6 +11,8 @@ import shippingRoutes from "./routes/shipping.js"
 import truckRoutes from "./routes/trucks.js"
 import complaintRoutes from "./routes/complaints.js"
 import settingsRoutes from "./routes/settings.js"
+import bidRoutes from "./routes/bids.js"
+import driverRoutes from "./routes/drivers.js"
 import pool from "./config/db.js" // Import to ensure connection is established
 import http from "http"
 import https from "https"
@@ -37,6 +39,8 @@ app.use("/api/shipping", shippingRoutes)
 app.use("/api/trucks", truckRoutes)
 app.use("/api/complaints", complaintRoutes)
 app.use("/api/settings", settingsRoutes)
+app.use("/api/bids", bidRoutes)
+app.use("/api/drivers", driverRoutes)
 
 // Basic route for testing
 app.get("/", (req, res) => {

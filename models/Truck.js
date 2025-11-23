@@ -15,31 +15,44 @@ export const createTruck = async (truckData) => {
     driverPhone,
     driverLicense,
     vehicleReg,
-    status = 'active'
+    status = 'active',
+    quantity = 1,
+    driverId = null
   } = truckData
 
-  const query = `
-    INSERT INTO trucks 
-    (fleetManagerId, plateNumber, vehicleType, vehicleModel, vehicleYear, capacity, 
-     driverName, driverPhone, driverLicense, vehicleReg, status, createdAt)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
-  `
+  // If quantity > 1, create multiple truck records
+  const truckIds = []
+  const basePlateNumber = plateNumber
   
-  const [result] = await pool.execute(query, [
-    fleetManagerId,
-    plateNumber,
-    vehicleType,
-    vehicleModel || null,
-    vehicleYear || null,
-    capacity || null,
-    driverName || null,
-    driverPhone || null,
-    driverLicense || null,
-    vehicleReg || null,
-    status
-  ])
+  for (let i = 0; i < quantity; i++) {
+    const currentPlateNumber = quantity > 1 ? `${basePlateNumber}-${i + 1}` : basePlateNumber
+    
+    const query = `
+      INSERT INTO trucks 
+      (fleetManagerId, plateNumber, vehicleType, vehicleModel, vehicleYear, capacity, 
+       driverName, driverPhone, driverLicense, vehicleReg, status, driverId, createdAt)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+    `
+    
+    const [result] = await pool.execute(query, [
+      fleetManagerId,
+      currentPlateNumber,
+      vehicleType,
+      vehicleModel || null,
+      vehicleYear || null,
+      capacity || null,
+      driverName || null,
+      driverPhone || null,
+      driverLicense || null,
+      vehicleReg || null,
+      status,
+      driverId || null
+    ])
+    
+    truckIds.push(result.insertId)
+  }
   
-  return result.insertId
+  return truckIds.length === 1 ? truckIds[0] : truckIds
 }
 
 /**
@@ -47,9 +60,15 @@ export const createTruck = async (truckData) => {
  */
 export const getTruckById = async (truckId) => {
   const query = `
-    SELECT t.*, u.fullName as fleetManagerName, u.email as fleetManagerEmail
+    SELECT t.*, 
+           u.fullName as fleetManagerName, 
+           u.email as fleetManagerEmail,
+           d.driverName,
+           d.phoneNumber as driverPhoneNumber,
+           d.driverLicense as driverLicenseNumber
     FROM trucks t
     LEFT JOIN users u ON t.fleetManagerId = u.id
+    LEFT JOIN drivers d ON t.driverId = d.id
     WHERE t.id = ?
   `
   const [rows] = await pool.execute(query, [truckId])
@@ -64,9 +83,14 @@ export const getTrucksByFleetManagerId = async (fleetManagerId, limit = 50, offs
   const offsetInt = parseInt(offset, 10) || 0
   
   const query = `
-    SELECT * FROM trucks 
-    WHERE fleetManagerId = ? 
-    ORDER BY createdAt DESC 
+    SELECT t.*,
+           d.driverName,
+           d.phoneNumber as driverPhoneNumber,
+           d.driverLicense as driverLicenseNumber
+    FROM trucks t
+    LEFT JOIN drivers d ON t.driverId = d.id
+    WHERE t.fleetManagerId = ? 
+    ORDER BY t.createdAt DESC 
     LIMIT ${limitInt} OFFSET ${offsetInt}
   `
   const [rows] = await pool.execute(query, [fleetManagerId])
@@ -87,14 +111,15 @@ export const updateTruck = async (truckId, fleetManagerId, truckData) => {
     driverPhone,
     driverLicense,
     vehicleReg,
-    status
+    status,
+    driverId
   } = truckData
 
   const query = `
     UPDATE trucks 
     SET plateNumber = ?, vehicleType = ?, vehicleModel = ?, vehicleYear = ?, 
         capacity = ?, driverName = ?, driverPhone = ?, driverLicense = ?, 
-        vehicleReg = ?, status = ?, updatedAt = NOW()
+        vehicleReg = ?, status = ?, driverId = ?, updatedAt = NOW()
     WHERE id = ? AND fleetManagerId = ?
   `
   
@@ -109,6 +134,7 @@ export const updateTruck = async (truckId, fleetManagerId, truckData) => {
     driverLicense || null,
     vehicleReg || null,
     status || 'active',
+    driverId !== undefined ? driverId : null,
     truckId,
     fleetManagerId
   ])
@@ -126,6 +152,24 @@ export const deleteTruck = async (truckId, fleetManagerId) => {
   `
   const [result] = await pool.execute(query, [truckId, fleetManagerId])
   return result.affectedRows > 0
+}
+
+/**
+ * Get all trucks assigned to a driver
+ */
+export const getTrucksByDriverId = async (driverId) => {
+  const query = `
+    SELECT t.*,
+           u.fullName as fleetManagerName,
+           u.email as fleetManagerEmail,
+           u.phone as fleetManagerPhone
+    FROM trucks t
+    LEFT JOIN users u ON t.fleetManagerId = u.id
+    WHERE t.driverId = ? 
+    ORDER BY t.createdAt DESC
+  `
+  const [rows] = await pool.execute(query, [driverId])
+  return rows
 }
 
 /**

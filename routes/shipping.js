@@ -178,15 +178,15 @@ router.get('/shipments/my-shipments', protect, getMyShipments);
 
 /**
  * @route   GET /api/shipping/shipments/available
- * @desc    Get all available shipments for truckers
- * @access  Private (Trucker only)
+ * @desc    Get all available shipments for truckers and fleet managers
+ * @access  Private (Trucker and Fleet Manager)
  */
 router.get('/shipments/available', protect, getAvailableShipmentsForTruckers);
 
 /**
  * @route   GET /api/shipping/shipments/my-jobs
- * @desc    Get all shipments assigned to logged-in trucker
- * @access  Private (Trucker only)
+ * @desc    Get all shipments assigned to logged-in trucker or fleet manager
+ * @access  Private (Trucker and Fleet Manager)
  */
 router.get('/shipments/my-jobs', protect, getMyAssignedShipments);
 

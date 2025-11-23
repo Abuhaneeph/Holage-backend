@@ -6,11 +6,15 @@ import {
   getTruck,
   updateTruckController,
   deleteTruckController,
+  getMyAssignedTrucks,
 } from "../controllers/truckController.js"
 
 const router = express.Router()
 
-// All routes require authentication and fleet_manager role
+// Route for drivers to get their assigned trucks (must be before fleet_manager middleware)
+router.get("/my-assigned", authenticate, authorizeRoles("driver"), getMyAssignedTrucks)
+
+// All other routes require authentication and fleet_manager role
 router.use(authenticate)
 router.use(authorizeRoles('fleet_manager'))
 

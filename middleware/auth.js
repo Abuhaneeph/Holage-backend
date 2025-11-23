@@ -1,5 +1,6 @@
 import jwt from "jsonwebtoken"
 import { findUserById } from "../models/User.js"
+import { getDriverById } from "../models/Driver.js"
 import dotenv from "dotenv"
 
 dotenv.config()
@@ -14,9 +15,26 @@ export const protect = async (req, res, next) => {
       token = req.headers.authorization.split(" ")[1]
       const decoded = jwt.verify(token, JWT_SECRET)
       
-      req.user = await findUserById(decoded.id)
-      if (!req.user) {
-        return res.status(401).json({ message: "Not authorized, user not found" })
+      // Check if it's a driver token (has role: 'driver')
+      if (decoded.role === 'driver') {
+        const driver = await getDriverById(decoded.id)
+        if (!driver) {
+          return res.status(401).json({ message: "Not authorized, driver not found" })
+        }
+        // Create a user-like object for drivers
+        req.user = {
+          id: driver.id,
+          role: 'driver',
+          fleetManagerId: driver.fleetManagerId,
+          driverName: driver.driverName,
+          phoneNumber: driver.phoneNumber
+        }
+      } else {
+        // Regular user token
+        req.user = await findUserById(decoded.id)
+        if (!req.user) {
+          return res.status(401).json({ message: "Not authorized, user not found" })
+        }
       }
       
       next()

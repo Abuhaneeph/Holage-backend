@@ -9,6 +9,9 @@ import {
   deleteShipment
 } from "../models/Shipment.js"
 import { findUserById, getWalletBalance, createWalletTransaction } from "../models/User.js"
+import { getAcceptedBidByShipmentId } from "../models/Bid.js"
+import { getDriverById } from "../models/Driver.js"
+import pool from "../config/db.js"
 import axios from "axios"
 import { calculateStateDistance, estimateShippingCost, slugify } from "../utils/distanceCalculator.js"
 
@@ -154,25 +157,40 @@ export const createNewShipment = async (req, res) => {
     // Deduct amount from shipper's wallet
     const timestamp = Date.now()
     const debitReference = `SHIPMENT-${timestamp}-${shipmentId}`
-    await createWalletTransaction(userId, {
-      reference: debitReference,
-      amount: shipmentCost,
-      currency: "NGN",
-      type: "debit",
-      status: "success",
-      description: `Payment for shipment #${shipmentId}`,
-      paystackReference: null,
-      metadata: JSON.stringify({ shipmentId, costBreakdown: costEstimate })
-    })
+    
+    try {
+      await createWalletTransaction(userId, {
+        reference: debitReference,
+        amount: shipmentCost,
+        currency: "NGN",
+        type: "debit",
+        status: "success",
+        description: `Payment for shipment #${shipmentId}`,
+        paystackReference: null,
+        metadata: JSON.stringify({ shipmentId, costBreakdown: costEstimate })
+      })
+      
+      console.log(`✅ Wallet debited for shipper ${userId}: ₦${shipmentCost} for shipment #${shipmentId}`)
+    } catch (walletError) {
+      console.error("Error debiting wallet:", walletError)
+      // If wallet debit fails, we should rollback the shipment creation
+      // For now, log the error but continue (you might want to add transaction rollback)
+      throw new Error(`Failed to debit wallet: ${walletError.message}`)
+    }
 
     // Get the created shipment
     const shipment = await getShipmentById(shipmentId)
+    
+    // Get updated wallet balance
+    const updatedBalance = await getWalletBalance(userId)
+    console.log(`💰 Updated wallet balance for user ${userId}: ₦${updatedBalance}`)
 
     res.status(201).json({
       success: true,
       message: "Shipment created successfully",
       shipment,
-      walletBalance: await getWalletBalance(userId)
+      walletBalance: updatedBalance,
+      deductedAmount: shipmentCost
     })
 
   } catch (error) {
@@ -220,7 +238,7 @@ export const getMyShipments = async (req, res) => {
 }
 
 /**
- * Get available shipments for truckers to bid on
+ * Get available shipments for truckers and fleet managers to bid on
  * Supports filtering by pickupState, destinationState, and truckType
  */
 export const getAvailableShipmentsForTruckers = async (req, res) => {
@@ -232,8 +250,9 @@ export const getAvailableShipmentsForTruckers = async (req, res) => {
       return res.status(404).json({ message: "User not found" })
     }
 
-    if (user.role !== "trucker") {
-      return res.status(403).json({ message: "Only truckers can access this endpoint" })
+    // Allow both truckers and fleet managers to view available shipments
+    if (user.role !== "trucker" && user.role !== "fleet_manager") {
+      return res.status(403).json({ message: "Only truckers and fleet managers can access this endpoint" })
     }
 
     const limit = parseInt(req.query.limit) || 20
@@ -268,7 +287,7 @@ export const getAvailableShipmentsForTruckers = async (req, res) => {
 }
 
 /**
- * Get all shipments assigned to the logged-in trucker
+ * Get all shipments assigned to the logged-in trucker or fleet manager
  */
 export const getMyAssignedShipments = async (req, res) => {
   const userId = req.user.id
@@ -279,8 +298,9 @@ export const getMyAssignedShipments = async (req, res) => {
       return res.status(404).json({ message: "User not found" })
     }
 
-    if (user.role !== "trucker") {
-      return res.status(403).json({ message: "Only truckers can access this endpoint" })
+    // Allow both truckers and fleet managers to view their assigned shipments
+    if (user.role !== "trucker" && user.role !== "fleet_manager") {
+      return res.status(403).json({ message: "Only truckers and fleet managers can access this endpoint" })
     }
 
     const limit = parseInt(req.query.limit) || 20
@@ -486,6 +506,74 @@ export const acceptShipment = async (req, res) => {
 }
 
 /**
+ * Helper function to check if a payment stage has already been credited
+ */
+const hasPaymentStageBeenCredited = async (shipmentId, bidId, paymentStage) => {
+  try {
+    // Check if a transaction with this payment stage already exists
+    const [transactions] = await pool.execute(
+      `SELECT * FROM wallet_transactions 
+       WHERE metadata LIKE ? AND metadata LIKE ? AND metadata LIKE ? AND type = 'credit' AND status = 'success'
+       LIMIT 1`,
+      [`%"shipmentId":${shipmentId}%`, `%"bidId":${bidId}%`, `%"paymentStage":"${paymentStage}"%`]
+    )
+    return transactions && transactions.length > 0
+  } catch (error) {
+    console.error("Error checking payment stage:", error)
+    return false
+  }
+}
+
+/**
+ * Helper function to credit payment for a shipment stage
+ */
+const creditPaymentStage = async (bid, shipmentId, paymentStage, percentage, description) => {
+  const bidAmount = parseFloat(bid.bidAmount || 0)
+  if (bidAmount <= 0) return false
+
+  const recipientId = bid.fleetManagerId || bid.truckerId
+  if (!recipientId) return false
+
+  // Check if this stage has already been credited
+  const alreadyCredited = await hasPaymentStageBeenCredited(shipmentId, bid.id, paymentStage)
+  if (alreadyCredited) {
+    console.log(`⚠️ Payment stage "${paymentStage}" already credited for shipment #${shipmentId}, bid #${bid.id}`)
+    return false
+  }
+
+  const creditAmount = bidAmount * (percentage / 100)
+  const timestamp = Date.now()
+  const creditReference = `SHIPMENT-${paymentStage.toUpperCase()}-${timestamp}-${shipmentId}-${bid.id}`
+  
+  try {
+    await createWalletTransaction(recipientId, {
+      reference: creditReference,
+      amount: creditAmount,
+      currency: "NGN",
+      type: "credit",
+      status: "success",
+      description: description,
+      paystackReference: null,
+      metadata: JSON.stringify({ 
+        shipmentId: shipmentId,
+        bidId: bid.id,
+        driverId: bid.driverId || null,
+        source: "shipment_payment",
+        paymentStage: paymentStage,
+        percentage: percentage,
+        totalBidAmount: bidAmount
+      })
+    })
+
+    console.log(`✅ Wallet credited for ${bid.fleetManagerId ? 'fleet manager' : 'trucker'} ${recipientId}: ₦${creditAmount} (${percentage}% of ₦${bidAmount}) for shipment #${shipmentId} (Bid #${bid.id}) - Stage: ${paymentStage}`)
+    return true
+  } catch (walletError) {
+    console.error(`Error crediting wallet for ${paymentStage}:`, walletError)
+    return false
+  }
+}
+
+/**
  * Update shipment status
  */
 export const updateShipment = async (req, res) => {
@@ -505,8 +593,31 @@ export const updateShipment = async (req, res) => {
       return res.status(404).json({ message: "Shipment not found" })
     }
 
-    // Only shipper or assigned trucker can update status
-    if (shipment.shipperId !== userId && shipment.truckerId !== userId) {
+    // Check access: shipper, assigned trucker, fleet manager, or driver (if shipment assigned to their fleet manager)
+    let hasAccess = false
+    
+    if (shipment.shipperId === userId) {
+      hasAccess = true // Shipper owns the shipment
+    } else if (shipment.truckerId === userId) {
+      hasAccess = true // Assigned trucker
+    } else if (user.role === "driver") {
+      // For drivers, check if shipment is assigned to their fleet manager
+      const driver = await getDriverById(userId)
+      if (driver && driver.fleetManagerId) {
+        // Check if there's an accepted bid for this shipment with this driver's fleet manager
+        const acceptedBid = await getAcceptedBidByShipmentId(shipmentId)
+        if (acceptedBid && acceptedBid.fleetManagerId === driver.fleetManagerId && acceptedBid.driverId === userId) {
+          hasAccess = true // Driver is assigned to this shipment via their fleet manager
+        }
+      }
+    } else if (user.role === "fleet_manager") {
+      // For fleet managers, check if shipment is assigned to them
+      if (shipment.truckerId === userId) {
+        hasAccess = true // Fleet manager is assigned as trucker
+      }
+    }
+    
+    if (!hasAccess) {
       return res.status(403).json({ message: "Access denied" })
     }
 
@@ -516,17 +627,55 @@ export const updateShipment = async (req, res) => {
       return res.status(400).json({ message: "Invalid status" })
     }
 
+    const oldStatus = shipment.status
     const success = await updateShipmentStatus(shipmentId, status)
     
     if (!success) {
       return res.status(400).json({ message: "Failed to update shipment status" })
     }
 
+    // Handle payment stages based on status changes
+    if (oldStatus !== status) {
+      // Get accepted bid for this shipment
+      const acceptedBid = await getAcceptedBidByShipmentId(shipmentId)
+      
+      if (acceptedBid) {
+        // When status changes to 'in_transit' (pickup), credit 60%
+        if (status === 'in_transit' && oldStatus !== 'in_transit') {
+          await creditPaymentStage(
+            acceptedBid,
+            shipmentId,
+            'picked_up',
+            60,
+            `Payment received for shipment #${shipmentId} (Bid #${acceptedBid.id}) - 60% pickup payment${acceptedBid.driverId ? ` - Driver: ${acceptedBid.driverName || 'N/A'}` : ''}`
+          )
+        }
+        
+        // When status changes to 'delivered' (completion), credit remaining 35%
+        if (status === 'delivered' && oldStatus !== 'delivered') {
+          await creditPaymentStage(
+            acceptedBid,
+            shipmentId,
+            'completed',
+            35,
+            `Payment received for shipment #${shipmentId} (Bid #${acceptedBid.id}) - 35% completion payment${acceptedBid.driverId ? ` - Driver: ${acceptedBid.driverName || 'N/A'}` : ''}`
+          )
+        }
+      }
+    }
+
     const updatedShipment = await getShipmentById(shipmentId)
+
+    let message = "Shipment status updated successfully"
+    if (status === 'in_transit' && acceptedBid) {
+      message = "Shipment status updated successfully. 60% payment has been credited to the trucker's wallet balance."
+    } else if (status === 'delivered' && acceptedBid) {
+      message = "Shipment status updated successfully. 35% completion payment has been credited to the trucker's wallet balance."
+    }
 
     res.status(200).json({
       success: true,
-      message: "Shipment status updated successfully",
+      message: message,
       shipment: updatedShipment
     })
 

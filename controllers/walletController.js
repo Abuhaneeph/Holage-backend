@@ -1009,6 +1009,199 @@ export const paystackTransferToBank = async (req, res) => {
 }
 
 /**
+ * Withdraw funds from wallet to bank account
+ * This function debits the wallet and transfers to bank account
+ */
+export const withdrawToBank = async (req, res) => {
+  try {
+    const userId = req.user?.id
+    const { amount } = req.body || {}
+    
+    if (!userId) {
+      return res.status(401).json({ message: "Unauthorized" })
+    }
+
+    if (!amount || amount < 100) {
+      return res.status(400).json({ message: "Amount is required and must be at least ₦100" })
+    }
+
+    // Get user details including bank account
+    const user = await findUserById(userId)
+    if (!user) {
+      return res.status(404).json({ message: "User not found" })
+    }
+
+    // Check if user has bank account details
+    if (!user.bankAccountNumber || !user.bankCode) {
+      return res.status(400).json({ 
+        message: "Bank account details required. Please update your profile with bank account information." 
+      })
+    }
+
+    // Check wallet balance
+    const walletBalance = await getWalletBalance(userId)
+    const withdrawAmount = parseFloat(amount)
+    
+    if (withdrawAmount > walletBalance) {
+      return res.status(400).json({ 
+        message: `Insufficient balance. Your wallet balance is ₦${walletBalance.toLocaleString('en-NG')}` 
+      })
+    }
+
+    if (!PAYSTACK_SECRET_KEY) {
+      return res.status(500).json({ message: "Paystack secret key not configured" })
+    }
+
+    // Create debit transaction first (pending status)
+    const timestamp = Date.now()
+    const debitReference = `WITHDRAW-${timestamp}-${userId}`
+    
+    await createWalletTransaction(userId, {
+      reference: debitReference,
+      amount: withdrawAmount,
+      currency: "NGN",
+      type: "debit",
+      status: "pending",
+      description: `Withdrawal to bank account: ${user.bankAccountNumber}`,
+      paystackReference: null,
+      metadata: JSON.stringify({ 
+        bankAccountNumber: user.bankAccountNumber,
+        bankCode: user.bankCode,
+        bankName: user.bankName
+      })
+    })
+
+    try {
+      // Create transfer recipient
+      const recipientData = {
+        type: "nuban",
+        name: user.fullName || "User",
+        account_number: user.bankAccountNumber,
+        bank_code: user.bankCode,
+        currency: "NGN"
+      }
+
+      const recipientResponse = await paystackRequest("POST", "/transferrecipient", recipientData)
+
+      if (!recipientResponse.status || !recipientResponse.data) {
+        // Update transaction to failed
+        await pool.execute(
+          `UPDATE wallet_transactions SET status = 'failed', updatedAt = NOW() WHERE reference = ?`,
+          [debitReference]
+        )
+        
+        // Check for specific Paystack account tier error
+        const errorMessage = recipientResponse.message || ""
+        if (errorMessage.includes("starter business") || errorMessage.includes("third party payouts")) {
+          return res.status(403).json({ 
+            message: "Withdrawal feature is not available. Your Paystack account needs to be upgraded to a Registered Business to enable transfers. Please upgrade your Paystack account in the Compliance section of your Paystack Dashboard.",
+            error: "Paystack account tier limitation",
+            requiresUpgrade: true
+          })
+        }
+        
+        return res.status(400).json({ 
+          message: "Failed to create transfer recipient",
+          error: recipientResponse.message 
+        })
+      }
+
+      // Perform transfer
+      const transferData = {
+        source: "balance",
+        amount: Math.round(withdrawAmount) * 100, // Convert to kobo
+        recipient: recipientResponse.data.recipient_code,
+        reason: `Wallet withdrawal - ${debitReference}`,
+        currency: "NGN"
+      }
+
+      const transferResponse = await paystackRequest("POST", "/transfer", transferData)
+
+      if (transferResponse.status && transferResponse.data) {
+        // Update transaction to success
+        await pool.execute(
+          `UPDATE wallet_transactions 
+           SET status = 'success', 
+               paystackReference = ?,
+               metadata = JSON_MERGE_PATCH(COALESCE(metadata, '{}'), ?),
+               updatedAt = NOW() 
+           WHERE reference = ?`,
+          [
+            transferResponse.data.reference || debitReference,
+            JSON.stringify({ 
+              transfer: transferResponse.data,
+              recipient: recipientResponse.data
+            }),
+            debitReference
+          ]
+        )
+
+        const newBalance = await getWalletBalance(userId)
+
+        return res.json({ 
+          success: true,
+          message: `Withdrawal of ₦${withdrawAmount.toLocaleString('en-NG')} successful. Funds have been transferred to your bank account.`,
+          transaction: {
+            reference: debitReference,
+            amount: withdrawAmount,
+            status: "success"
+          },
+          balance: newBalance,
+          transfer: transferResponse.data
+        })
+      } else {
+        // Transfer failed - update transaction to failed
+        await pool.execute(
+          `UPDATE wallet_transactions SET status = 'failed', updatedAt = NOW() WHERE reference = ?`,
+          [debitReference]
+        )
+        
+        // Check for specific Paystack account tier error
+        const errorMessage = transferResponse.message || ""
+        if (errorMessage.includes("starter business") || errorMessage.includes("third party payouts")) {
+          return res.status(403).json({ 
+            message: "Withdrawal feature is not available. Your Paystack account needs to be upgraded to a Registered Business to enable transfers. Please upgrade your Paystack account in the Compliance section of your Paystack Dashboard.",
+            error: "Paystack account tier limitation",
+            requiresUpgrade: true
+          })
+        }
+        
+        return res.status(400).json({ 
+          message: "Transfer failed",
+          error: transferResponse.message || "Unknown error"
+        })
+      }
+    } catch (transferError) {
+      // Update transaction to failed
+      await pool.execute(
+        `UPDATE wallet_transactions SET status = 'failed', updatedAt = NOW() WHERE reference = ?`,
+        [debitReference]
+      )
+      
+      console.error("Error processing withdrawal:", transferError)
+      
+      // Check for specific Paystack account tier error in catch block
+      const errorMessage = transferError.message || transferError.response?.data?.message || ""
+      if (errorMessage.includes("starter business") || errorMessage.includes("third party payouts")) {
+        return res.status(403).json({ 
+          message: "Withdrawal feature is not available. Your Paystack account needs to be upgraded to a Registered Business to enable transfers. Please upgrade your Paystack account in the Compliance section of your Paystack Dashboard.",
+          error: "Paystack account tier limitation",
+          requiresUpgrade: true
+        })
+      }
+      
+      return res.status(500).json({ 
+        message: transferError.message || "Failed to process withdrawal",
+        error: transferError.response?.data || transferError.message
+      })
+    }
+  } catch (error) {
+    console.error("Error withdrawing funds:", error)
+    return res.status(500).json({ message: error.message || "Failed to withdraw funds" })
+  }
+}
+
+/**
  * Get list of Nigerian banks from Paystack
  */
 export const getPaystackBanks = async (req, res) => {
@@ -1034,5 +1227,57 @@ export const getPaystackBanks = async (req, res) => {
   } catch (error) {
     console.error("Error fetching Paystack banks:", error)
     return res.status(500).json({ message: error.message || "Failed to fetch banks" })
+  }
+}
+
+/**
+ * Resolve bank account number to get account name
+ */
+export const resolveBankAccount = async (req, res) => {
+  try {
+    const { account_number, bank_code } = req.query
+
+    if (!account_number || !bank_code) {
+      return res.status(400).json({ 
+        message: "account_number and bank_code are required" 
+      })
+    }
+
+    if (!PAYSTACK_SECRET_KEY) {
+      return res.status(500).json({ message: "Paystack secret key not configured" })
+    }
+
+    const resolveResponse = await paystackRequest(
+      "GET", 
+      `/bank/resolve?account_number=${account_number}&bank_code=${bank_code}`
+    )
+    
+    if (resolveResponse.status && resolveResponse.data) {
+      return res.json({
+        success: true,
+        account_name: resolveResponse.data.account_name,
+        account_number: resolveResponse.data.account_number
+      })
+    } else {
+      return res.status(400).json({ 
+        message: resolveResponse.message || "Failed to resolve account",
+        error: resolveResponse.message 
+      })
+    }
+  } catch (error) {
+    console.error("Error resolving bank account:", error)
+    let errorMessage = error.response?.data?.message || error.message || "Failed to resolve account"
+    let statusCode = error.response?.status || 500
+    
+    // Handle Paystack test mode limitations
+    if (errorMessage.includes("Test mode daily limit") || errorMessage.includes("test bank codes")) {
+      errorMessage = "Account verification is temporarily unavailable in test mode. Please try again later or contact support."
+      statusCode = 503 // Service Unavailable
+    }
+    
+    return res.status(statusCode).json({ 
+      message: errorMessage,
+      error: errorMessage
+    })
   }
 }

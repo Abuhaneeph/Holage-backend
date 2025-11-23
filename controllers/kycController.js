@@ -227,25 +227,70 @@ export const updateBankAccount = async (req, res) => {
     const userId = req.user.id
     const { bankAccountNumber, bankCode, bankName } = req.body || {}
 
+    let finalBankCode = bankCode
+
     // Validate that if any bank field is provided, account number and code are required
     if (bankAccountNumber || bankCode || bankName) {
-      if (!bankAccountNumber || !bankCode) {
+      if (!bankAccountNumber) {
         return res.status(400).json({ 
-          message: "Both account number and bank code are required when updating bank details." 
+          message: "Account number is required when updating bank details." 
         })
       }
 
-      // Validate bank code format (should be 3 digits)
-      if (!/^\d{3}$/.test(bankCode)) {
+      // If bankName is provided but bankCode is not, try to fetch from Paystack
+      if (bankName && !bankCode) {
+        try {
+          const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY
+          if (PAYSTACK_SECRET_KEY) {
+            const axios = (await import('axios')).default
+            const banksResponse = await axios.get(
+              'https://api.paystack.co/bank?country=nigeria',
+              {
+                headers: {
+                  Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
+                  'Content-Type': 'application/json'
+                }
+              }
+            )
+
+            if (banksResponse.data.status && banksResponse.data.data) {
+              const bank = banksResponse.data.data.find(
+                b => b.name.toLowerCase() === bankName.toLowerCase() || 
+                     b.slug.toLowerCase() === bankName.toLowerCase() ||
+                     b.name.toLowerCase().includes(bankName.toLowerCase()) ||
+                     bankName.toLowerCase().includes(b.name.toLowerCase())
+              )
+              if (bank) {
+                finalBankCode = bank.code
+                console.log(`✅ Found bank code for ${bankName}: ${finalBankCode}`)
+              }
+            }
+          }
+        } catch (fetchError) {
+          console.error('Error fetching bank code from Paystack:', fetchError.message)
+          // Continue with validation - user must provide bank code manually
+        }
+      }
+
+      if (!finalBankCode) {
         return res.status(400).json({ 
-          message: "Invalid bank code format. Bank code must be 3 digits." 
+          message: "Bank code is required. Please provide the bank code or ensure the bank name is recognized by Paystack." 
         })
       }
 
-      // Validate account number format (should be 10 digits)
-      if (!/^\d{10}$/.test(bankAccountNumber)) {
+      // Validate bank code format (should be numeric, 3-10 digits to support all Paystack bank codes)
+      // OPay uses 999992 (6 digits), so we allow 3-10 digits
+      if (!/^\d{3,10}$/.test(finalBankCode)) {
         return res.status(400).json({ 
-          message: "Invalid account number format. Account number must be 10 digits." 
+          message: "Invalid bank code format. Bank code must be numeric (3-10 digits)." 
+        })
+      }
+
+      // Validate account number format (should be 10 digits, but some banks may have different lengths)
+      // Allow 8-12 digits to accommodate different bank account number formats
+      if (!/^\d{8,12}$/.test(bankAccountNumber)) {
+        return res.status(400).json({ 
+          message: "Invalid account number format. Account number must be 8-12 digits." 
         })
       }
     }
@@ -253,7 +298,7 @@ export const updateBankAccount = async (req, res) => {
     // Update bank account details
     await updateUserBankAccount(userId, {
       bankAccountNumber: bankAccountNumber || null,
-      bankCode: bankCode || null,
+      bankCode: finalBankCode || null,
       bankName: bankName || null
     })
 

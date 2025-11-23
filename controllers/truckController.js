@@ -2,6 +2,7 @@ import {
   createTruck,
   getTruckById,
   getTrucksByFleetManagerId,
+  getTrucksByDriverId,
   updateTruck,
   deleteTruck,
   checkPlateNumberExists,
@@ -13,16 +14,25 @@ import {
 export const createTruckController = async (req, res) => {
   try {
     const userId = req.user.id
-    const { plateNumber, vehicleType, vehicleModel, vehicleYear, capacity, driverName, driverPhone, driverLicense, vehicleReg } = req.body
+    const { plateNumber, vehicleType, vehicleModel, vehicleYear, capacity, driverName, driverPhone, driverLicense, vehicleReg, quantity, driverId } = req.body
 
     if (!plateNumber || !vehicleType) {
       return res.status(400).json({ message: "Plate number and vehicle type are required." })
     }
 
-    // Check if plate number already exists for this fleet manager
+    // Check if plate number already exists for this fleet manager (only check base plate number)
     const plateExists = await checkPlateNumberExists(plateNumber, userId)
     if (plateExists) {
       return res.status(409).json({ message: "A truck with this plate number already exists in your fleet." })
+    }
+
+    // If driverId is provided, verify it belongs to this fleet manager
+    if (driverId) {
+      const { getDriverById } = await import("../models/Driver.js")
+      const driver = await getDriverById(driverId)
+      if (!driver || driver.fleetManagerId !== userId) {
+        return res.status(403).json({ message: "Driver not found or does not belong to you." })
+      }
     }
 
     const truckId = await createTruck({
@@ -36,13 +46,18 @@ export const createTruckController = async (req, res) => {
       driverPhone,
       driverLicense,
       vehicleReg,
+      quantity: quantity || 1,
+      driverId: driverId || null,
     })
 
-    const truck = await getTruckById(truckId)
+    // If multiple trucks were created, return the first one
+    const truckIdToReturn = Array.isArray(truckId) ? truckId[0] : truckId
+    const truck = await getTruckById(truckIdToReturn)
 
     res.status(201).json({
-      message: "Truck added successfully.",
+      message: Array.isArray(truckId) ? `${truckId.length} trucks added successfully.` : "Truck added successfully.",
       truck,
+      truckIds: Array.isArray(truckId) ? truckId : [truckId],
     })
   } catch (error) {
     console.error("Error creating truck:", error)
@@ -107,7 +122,7 @@ export const updateTruckController = async (req, res) => {
   try {
     const userId = req.user.id
     const { truckId } = req.params
-    const { plateNumber, vehicleType, vehicleModel, vehicleYear, capacity, driverName, driverPhone, driverLicense, vehicleReg, status } = req.body
+    const { plateNumber, vehicleType, vehicleModel, vehicleYear, capacity, driverName, driverPhone, driverLicense, vehicleReg, status, driverId } = req.body
 
     if (!plateNumber || !vehicleType) {
       return res.status(400).json({ message: "Plate number and vehicle type are required." })
@@ -117,6 +132,15 @@ export const updateTruckController = async (req, res) => {
     const plateExists = await checkPlateNumberExists(plateNumber, userId, truckId)
     if (plateExists) {
       return res.status(409).json({ message: "A truck with this plate number already exists in your fleet." })
+    }
+
+    // If driverId is provided, verify it belongs to this fleet manager
+    if (driverId) {
+      const { getDriverById } = await import("../models/Driver.js")
+      const driver = await getDriverById(driverId)
+      if (!driver || driver.fleetManagerId !== userId) {
+        return res.status(403).json({ message: "Driver not found or does not belong to you." })
+      }
     }
 
     const updated = await updateTruck(truckId, userId, {
@@ -130,6 +154,7 @@ export const updateTruckController = async (req, res) => {
       driverLicense,
       vehicleReg,
       status,
+      driverId: driverId || null, // Allow setting driverId to null to unassign
     })
 
     if (!updated) {
@@ -168,6 +193,32 @@ export const deleteTruckController = async (req, res) => {
   } catch (error) {
     console.error("Error deleting truck:", error)
     res.status(500).json({ message: "Server error during truck deletion." })
+  }
+}
+
+/**
+ * Get trucks assigned to a driver (for driver dashboard)
+ */
+export const getMyAssignedTrucks = async (req, res) => {
+  try {
+    const driverId = req.user.id
+    const userRole = req.user.role
+
+    // Only drivers can access this endpoint
+    if (userRole !== "driver") {
+      return res.status(403).json({ message: "Only drivers can access this endpoint" })
+    }
+
+    const trucks = await getTrucksByDriverId(driverId)
+
+    res.status(200).json({
+      success: true,
+      trucks,
+      count: trucks.length,
+    })
+  } catch (error) {
+    console.error("Error fetching assigned trucks:", error)
+    res.status(500).json({ message: "Server error during trucks fetch." })
   }
 }
 

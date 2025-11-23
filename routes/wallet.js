@@ -16,7 +16,9 @@ import {
   paystackInitiatePayment,
   paystackWebhook,
   paystackTransferToBank,
+  withdrawToBank,
   getPaystackBanks,
+  resolveBankAccount,
   verifyPaystackPayment,
   creditWalletFromPaystackCallback,
 } from "../controllers/walletController.js"
@@ -56,7 +58,9 @@ router.get("/paystack/verify", authenticate, verifyPaystackPayment) // Verify pa
 router.post("/paystack/credit", authenticate, creditWalletFromPaystackCallback) // Credit wallet directly from callback
 router.post("/paystack/webhook", paystackWebhook)
 router.post("/paystack/transfer", authenticate, paystackTransferToBank)
+router.post("/withdraw", authenticate, withdrawToBank) // Withdraw from wallet to bank account
 router.get("/paystack/banks", getPaystackBanks) // Public endpoint to get bank list
+router.get("/paystack/resolve-account", resolveBankAccount) // Public endpoint to resolve account name
 
 // OPay Digital Wallets
 router.post("/opay/wallet/create", authenticate, opayCreateWallet)
