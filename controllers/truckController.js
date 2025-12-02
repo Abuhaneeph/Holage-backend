@@ -14,7 +14,11 @@ import {
 export const createTruckController = async (req, res) => {
   try {
     const userId = req.user.id
-    const { plateNumber, vehicleType, vehicleModel, vehicleYear, capacity, driverName, driverPhone, driverLicense, vehicleReg, quantity, driverId } = req.body
+    const { 
+      plateNumber, vehicleType, vehicleModel, vehicleYear, capacity, 
+      driverName, driverPhone, driverLicense, vehicleReg, quantity, driverId,
+      product, description, type, color, imageUrl, notes
+    } = req.body
 
     if (!plateNumber || !vehicleType) {
       return res.status(400).json({ message: "Plate number and vehicle type are required." })
@@ -48,6 +52,12 @@ export const createTruckController = async (req, res) => {
       vehicleReg,
       quantity: quantity || 1,
       driverId: driverId || null,
+      product: product || null,
+      description: description || null,
+      type: type || null,
+      color: color || null,
+      imageUrl: imageUrl || null,
+      notes: notes || null
     })
 
     // If multiple trucks were created, return the first one
@@ -122,7 +132,11 @@ export const updateTruckController = async (req, res) => {
   try {
     const userId = req.user.id
     const { truckId } = req.params
-    const { plateNumber, vehicleType, vehicleModel, vehicleYear, capacity, driverName, driverPhone, driverLicense, vehicleReg, status, driverId } = req.body
+    const { 
+      plateNumber, vehicleType, vehicleModel, vehicleYear, capacity, 
+      driverName, driverPhone, driverLicense, vehicleReg, status, driverId,
+      product, description, type, color, imageUrl, notes
+    } = req.body
 
     if (!plateNumber || !vehicleType) {
       return res.status(400).json({ message: "Plate number and vehicle type are required." })
@@ -155,6 +169,12 @@ export const updateTruckController = async (req, res) => {
       vehicleReg,
       status,
       driverId: driverId || null, // Allow setting driverId to null to unassign
+      product,
+      description,
+      type,
+      color,
+      imageUrl,
+      notes
     })
 
     if (!updated) {

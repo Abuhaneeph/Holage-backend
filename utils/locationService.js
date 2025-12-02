@@ -46,7 +46,12 @@ export const getStatesWithLgas = async () => {
     lastFetch = now
     return states
   } catch (error) {
-    console.error("Failed to fetch states from remote source:", error.message)
+    // Remote API unavailable - using local fallback (this is expected and not an error)
+    if (error.message.includes('404')) {
+      console.log("ℹ️  Remote states API unavailable, using local fallback data")
+    } else {
+      console.warn("⚠️  Failed to fetch states from remote source, using local fallback:", error.message)
+    }
 
     // Fallback to states from coordinates data (without LGAs)
     const fallbackStates = Object.values(stateCoordinates).map((state) => ({

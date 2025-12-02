@@ -6,11 +6,14 @@ import {
   getAvailableShipments,
   assignTruckerToShipment,
   updateShipmentStatus,
+  confirmPickup,
+  confirmDelivery,
   deleteShipment
 } from "../models/Shipment.js"
 import { findUserById, getWalletBalance, createWalletTransaction } from "../models/User.js"
 import { getAcceptedBidByShipmentId } from "../models/Bid.js"
 import { getDriverById } from "../models/Driver.js"
+import { notifyShipmentStatusChange, notifyPayment } from "../utils/notificationService.js"
 import pool from "../config/db.js"
 import axios from "axios"
 import { calculateStateDistance, estimateShippingCost, slugify } from "../utils/distanceCalculator.js"
@@ -62,6 +65,16 @@ export const createNewShipment = async (req, res) => {
     if (!pickupState || !pickupLga || !destinationState || !destinationLga || !cargoType || !weight || !truckType || !pickupDate) {
       return res.status(400).json({ 
         message: "All fields are required: pickupState, pickupLga, destinationState, destinationLga, cargoType, weight, truckType, pickupDate" 
+      })
+    }
+
+    // Filter out "00" and "0" from LGA values - convert to null
+    const cleanPickupLga = (pickupLga === '00' || pickupLga === '0' || !pickupLga.trim()) ? null : pickupLga
+    const cleanDestinationLga = (destinationLga === '00' || destinationLga === '0' || !destinationLga.trim()) ? null : destinationLga
+    
+    if (!cleanPickupLga || !cleanDestinationLga) {
+      return res.status(400).json({ 
+        message: "Invalid LGA selection. Please select a valid LGA for both pickup and destination." 
       })
     }
 
@@ -140,9 +153,9 @@ export const createNewShipment = async (req, res) => {
     const shipmentId = await createShipment({
       shipperId: userId,
       pickupState,
-      pickupLga,
+      pickupLga: cleanPickupLga,
       destinationState,
-      destinationLga,
+      destinationLga: cleanDestinationLga,
       cargoType,
       weight: parseFloat(weight),
       truckType,
@@ -269,6 +282,12 @@ export const getAvailableShipmentsForTruckers = async (req, res) => {
     if (req.query.truckType) {
       filters.truckType = req.query.truckType
     }
+    if (req.query.cargoType) {
+      filters.cargoType = req.query.cargoType
+    }
+    if (req.query.weight) {
+      filters.weight = req.query.weight
+    }
 
     const shipments = await getAvailableShipments(limit, offset, filters)
 
@@ -330,9 +349,16 @@ export const getShipmentDetails = async (req, res) => {
   const { shipmentId } = req.params
   
   try {
-    const user = await findUserById(userId)
-    if (!user) {
-      return res.status(404).json({ message: "User not found" })
+    // For drivers, use req.user directly (set by auth middleware)
+    // For other users, fetch from database
+    let user
+    if (req.user.role === 'driver') {
+      user = req.user
+    } else {
+      user = await findUserById(userId)
+      if (!user) {
+        return res.status(404).json({ message: "User not found" })
+      }
     }
 
     const shipment = await getShipmentById(shipmentId)
@@ -582,9 +608,16 @@ export const updateShipment = async (req, res) => {
   const { status } = req.body
   
   try {
-    const user = await findUserById(userId)
-    if (!user) {
-      return res.status(404).json({ message: "User not found" })
+    // For drivers, use req.user directly (set by auth middleware)
+    // For other users, fetch from database
+    let user
+    if (req.user.role === 'driver') {
+      user = req.user
+    } else {
+      user = await findUserById(userId)
+      if (!user) {
+        return res.status(404).json({ message: "User not found" })
+      }
     }
 
     const shipment = await getShipmentById(shipmentId)
@@ -602,11 +635,11 @@ export const updateShipment = async (req, res) => {
       hasAccess = true // Assigned trucker
     } else if (user.role === "driver") {
       // For drivers, check if shipment is assigned to their fleet manager
-      const driver = await getDriverById(userId)
-      if (driver && driver.fleetManagerId) {
+      // req.user.fleetManagerId is already set by auth middleware
+      if (req.user.fleetManagerId) {
         // Check if there's an accepted bid for this shipment with this driver's fleet manager
         const acceptedBid = await getAcceptedBidByShipmentId(shipmentId)
-        if (acceptedBid && acceptedBid.fleetManagerId === driver.fleetManagerId && acceptedBid.driverId === userId) {
+        if (acceptedBid && acceptedBid.fleetManagerId === req.user.fleetManagerId && acceptedBid.driverId === userId) {
           hasAccess = true // Driver is assigned to this shipment via their fleet manager
         }
       }
@@ -621,10 +654,38 @@ export const updateShipment = async (req, res) => {
       return res.status(403).json({ message: "Access denied" })
     }
 
-    // Validate status
-    const validStatuses = ['pending', 'assigned', 'in_transit', 'delivered', 'cancelled']
+    // Validate status - drivers/truckers can only update to specific statuses
+    const validStatuses = ['pending', 'assigned', 'picking_up', 'picked_up', 'in_transit', 'delivered', 'cancelled']
     if (!validStatuses.includes(status)) {
       return res.status(400).json({ message: "Invalid status" })
+    }
+
+    // Only shippers can set status to cancelled
+    if (status === 'cancelled' && shipment.shipperId !== userId) {
+      return res.status(403).json({ message: "Only shippers can cancel shipments" })
+    }
+
+    // Status transition validation for drivers/truckers
+    if (user.role === 'driver' || user.role === 'trucker' || user.role === 'fleet_manager') {
+      const validTransitions = {
+        'assigned': ['picking_up'],
+        'picking_up': ['picked_up'],
+        'picked_up': ['in_transit'], // Only after shipper confirms pickup
+        'in_transit': ['delivered'] // Only after shipper confirms delivery
+      }
+      
+      if (validTransitions[shipment.status] && !validTransitions[shipment.status].includes(status)) {
+        return res.status(400).json({ 
+          message: `Invalid status transition. Current status: ${shipment.status}. Cannot transition to ${status}.` 
+        })
+      }
+
+      // Check if pickup is confirmed before allowing in_transit
+      if (status === 'in_transit' && !shipment.pickupConfirmed) {
+        return res.status(400).json({ 
+          message: "Cannot start trip to destination. Shipper must confirm pickup first." 
+        })
+      }
     }
 
     const oldStatus = shipment.status
@@ -634,43 +695,51 @@ export const updateShipment = async (req, res) => {
       return res.status(400).json({ message: "Failed to update shipment status" })
     }
 
-    // Handle payment stages based on status changes
+    // Note: Payments are now handled by shipper confirmation endpoints, not status changes
+    const updatedShipment = await getShipmentById(shipmentId)
+
+    // Send notifications for status changes
     if (oldStatus !== status) {
-      // Get accepted bid for this shipment
-      const acceptedBid = await getAcceptedBidByShipmentId(shipmentId)
-      
-      if (acceptedBid) {
-        // When status changes to 'in_transit' (pickup), credit 60%
-        if (status === 'in_transit' && oldStatus !== 'in_transit') {
-          await creditPaymentStage(
-            acceptedBid,
-            shipmentId,
-            'picked_up',
-            60,
-            `Payment received for shipment #${shipmentId} (Bid #${acceptedBid.id}) - 60% pickup payment${acceptedBid.driverId ? ` - Driver: ${acceptedBid.driverName || 'N/A'}` : ''}`
-          )
+      try {
+        const recipients = []
+        
+        // Add shipper to recipients
+        if (shipment.shipperId) {
+          recipients.push(shipment.shipperId)
         }
         
-        // When status changes to 'delivered' (completion), credit remaining 35%
-        if (status === 'delivered' && oldStatus !== 'delivered') {
-          await creditPaymentStage(
-            acceptedBid,
-            shipmentId,
-            'completed',
-            35,
-            `Payment received for shipment #${shipmentId} (Bid #${acceptedBid.id}) - 35% completion payment${acceptedBid.driverId ? ` - Driver: ${acceptedBid.driverName || 'N/A'}` : ''}`
-          )
+        // Add trucker/driver to recipients
+        if (shipment.truckerId) {
+          recipients.push(shipment.truckerId)
         }
+        
+        // If there's a driver, add them too
+        const acceptedBid = await getAcceptedBidByShipmentId(shipmentId)
+        if (acceptedBid && acceptedBid.driverId) {
+          recipients.push(acceptedBid.driverId)
+        }
+
+        // Remove duplicates
+        const uniqueRecipients = [...new Set(recipients)]
+        
+        if (uniqueRecipients.length > 0) {
+          await notifyShipmentStatusChange(updatedShipment, oldStatus, status, uniqueRecipients)
+        }
+      } catch (notifError) {
+        console.error("Error sending notifications:", notifError)
+        // Don't fail the request if notification fails
       }
     }
 
-    const updatedShipment = await getShipmentById(shipmentId)
-
     let message = "Shipment status updated successfully"
-    if (status === 'in_transit' && acceptedBid) {
-      message = "Shipment status updated successfully. 60% payment has been credited to the trucker's wallet balance."
-    } else if (status === 'delivered' && acceptedBid) {
-      message = "Shipment status updated successfully. 35% completion payment has been credited to the trucker's wallet balance."
+    if (status === 'picking_up') {
+      message = "Trip to pick up shipment started. Please proceed to the pickup location."
+    } else if (status === 'picked_up') {
+      message = "Pickup completed. Waiting for shipper confirmation to release 60% payment and start trip to destination."
+    } else if (status === 'in_transit') {
+      message = "Trip to destination started. Proceed to the delivery location."
+    } else if (status === 'delivered') {
+      message = "Delivery completed. Waiting for shipper confirmation to release remaining 35% payment."
     }
 
     res.status(200).json({
@@ -722,6 +791,197 @@ export const deleteShipmentById = async (req, res) => {
     console.error("Error deleting shipment:", error)
     res.status(500).json({ 
       message: "Server error deleting shipment", 
+      error: error.message 
+    })
+  }
+}
+
+/**
+ * Confirm pickup by shipper (releases 60% payment)
+ */
+export const confirmPickupByShipper = async (req, res) => {
+  const userId = req.user.id
+  const { shipmentId } = req.params
+  
+  try {
+    const user = await findUserById(userId)
+    if (!user) {
+      return res.status(404).json({ message: "User not found" })
+    }
+
+    if (user.role !== "shipper") {
+      return res.status(403).json({ message: "Only shippers can confirm pickup" })
+    }
+
+    const shipment = await getShipmentById(shipmentId)
+    
+    if (!shipment) {
+      return res.status(404).json({ message: "Shipment not found" })
+    }
+
+    if (shipment.shipperId !== userId) {
+      return res.status(403).json({ message: "You can only confirm pickup for your own shipments" })
+    }
+
+    if (shipment.pickupConfirmed) {
+      return res.status(400).json({ message: "Pickup has already been confirmed" })
+    }
+
+    if (shipment.status !== 'picked_up') {
+      return res.status(400).json({ 
+        message: `Cannot confirm pickup. Current status is "${shipment.status}". Driver must mark shipment as "picked_up" first.` 
+      })
+    }
+
+    // Confirm pickup
+    const success = await confirmPickup(shipmentId)
+    
+    if (!success) {
+      return res.status(400).json({ message: "Failed to confirm pickup" })
+    }
+
+    // Update status to in_transit (ready to start trip to destination)
+    await updateShipmentStatus(shipmentId, 'in_transit')
+
+    // Get accepted bid and credit 60% payment
+    const acceptedBid = await getAcceptedBidByShipmentId(shipmentId)
+    
+    if (acceptedBid) {
+      const creditAmount = parseFloat(acceptedBid.bidAmount) * 0.6
+      await creditPaymentStage(
+        acceptedBid,
+        shipmentId,
+        'picked_up',
+        60,
+        `Payment received for shipment #${shipmentId} (Bid #${acceptedBid.id}) - 60% pickup payment${acceptedBid.driverId ? ` - Driver: ${acceptedBid.driverName || 'N/A'}` : ''}`
+      )
+
+      // Send payment notification
+      const recipientId = acceptedBid.fleetManagerId || acceptedBid.truckerId
+      if (recipientId) {
+        try {
+          await notifyPayment(
+            recipientId,
+            creditAmount,
+            'credit',
+            `60% payment received for shipment #${shipmentId}`,
+            { shipmentId, bidId: acceptedBid.id, paymentStage: 'picked_up', percentage: 60 }
+          )
+        } catch (notifError) {
+          console.error("Error sending payment notification:", notifError)
+        }
+      }
+    }
+
+    const updatedShipment = await getShipmentById(shipmentId)
+
+    res.status(200).json({
+      success: true,
+      message: "Pickup confirmed successfully. 60% payment has been credited to the trucker's wallet. Driver can now start trip to destination.",
+      shipment: updatedShipment
+    })
+
+  } catch (error) {
+    console.error("Error confirming pickup:", error)
+    res.status(500).json({ 
+      message: "Server error confirming pickup", 
+      error: error.message 
+    })
+  }
+}
+
+/**
+ * Confirm delivery by shipper (releases remaining 35% payment)
+ */
+export const confirmDeliveryByShipper = async (req, res) => {
+  const userId = req.user.id
+  const { shipmentId } = req.params
+  
+  try {
+    const user = await findUserById(userId)
+    if (!user) {
+      return res.status(404).json({ message: "User not found" })
+    }
+
+    if (user.role !== "shipper") {
+      return res.status(403).json({ message: "Only shippers can confirm delivery" })
+    }
+
+    const shipment = await getShipmentById(shipmentId)
+    
+    if (!shipment) {
+      return res.status(404).json({ message: "Shipment not found" })
+    }
+
+    if (shipment.shipperId !== userId) {
+      return res.status(403).json({ message: "You can only confirm delivery for your own shipments" })
+    }
+
+    if (shipment.deliveryConfirmed) {
+      return res.status(400).json({ message: "Delivery has already been confirmed" })
+    }
+
+    if (shipment.status !== 'delivered') {
+      return res.status(400).json({ 
+        message: `Cannot confirm delivery. Current status is "${shipment.status}". Driver must mark shipment as "delivered" first.` 
+      })
+    }
+
+    if (!shipment.pickupConfirmed) {
+      return res.status(400).json({ 
+        message: "Cannot confirm delivery. Pickup must be confirmed first." 
+      })
+    }
+
+    // Confirm delivery
+    const success = await confirmDelivery(shipmentId)
+    
+    if (!success) {
+      return res.status(400).json({ message: "Failed to confirm delivery" })
+    }
+
+    // Get accepted bid and credit remaining 35% payment
+    const acceptedBid = await getAcceptedBidByShipmentId(shipmentId)
+    
+    if (acceptedBid) {
+      const creditAmount = parseFloat(acceptedBid.bidAmount) * 0.35
+      await creditPaymentStage(
+        acceptedBid,
+        shipmentId,
+        'completed',
+        35,
+        `Payment received for shipment #${shipmentId} (Bid #${acceptedBid.id}) - 35% completion payment${acceptedBid.driverId ? ` - Driver: ${acceptedBid.driverName || 'N/A'}` : ''}`
+      )
+
+      // Send payment notification
+      const recipientId = acceptedBid.fleetManagerId || acceptedBid.truckerId
+      if (recipientId) {
+        try {
+          await notifyPayment(
+            recipientId,
+            creditAmount,
+            'credit',
+            `35% completion payment received for shipment #${shipmentId}`,
+            { shipmentId, bidId: acceptedBid.id, paymentStage: 'completed', percentage: 35 }
+          )
+        } catch (notifError) {
+          console.error("Error sending payment notification:", notifError)
+        }
+      }
+    }
+
+    const updatedShipment = await getShipmentById(shipmentId)
+
+    res.status(200).json({
+      success: true,
+      message: "Delivery confirmed successfully. Remaining 35% payment has been credited to the trucker's wallet.",
+      shipment: updatedShipment
+    })
+
+  } catch (error) {
+    console.error("Error confirming delivery:", error)
+    res.status(500).json({ 
+      message: "Server error confirming delivery", 
       error: error.message 
     })
   }

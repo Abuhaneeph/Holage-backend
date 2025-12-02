@@ -13,6 +13,9 @@ import complaintRoutes from "./routes/complaints.js"
 import settingsRoutes from "./routes/settings.js"
 import bidRoutes from "./routes/bids.js"
 import driverRoutes from "./routes/drivers.js"
+import notificationRoutes from "./routes/notifications.js"
+import podRoutes from "./routes/pod.js"
+import locationRoutes from "./routes/location.js"
 import pool from "./config/db.js" // Import to ensure connection is established
 import http from "http"
 import https from "https"
@@ -41,6 +44,9 @@ app.use("/api/complaints", complaintRoutes)
 app.use("/api/settings", settingsRoutes)
 app.use("/api/bids", bidRoutes)
 app.use("/api/drivers", driverRoutes)
+app.use("/api/notifications", notificationRoutes)
+app.use("/api/pod", podRoutes)
+app.use("/api/location", locationRoutes)
 
 // Basic route for testing
 app.get("/", (req, res) => {

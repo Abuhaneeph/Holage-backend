@@ -17,7 +17,13 @@ export const createTruck = async (truckData) => {
     vehicleReg,
     status = 'active',
     quantity = 1,
-    driverId = null
+    driverId = null,
+    product = null,
+    description = null,
+    type = null,
+    color = null,
+    imageUrl = null,
+    notes = null
   } = truckData
 
   // If quantity > 1, create multiple truck records
@@ -30,8 +36,9 @@ export const createTruck = async (truckData) => {
     const query = `
       INSERT INTO trucks 
       (fleetManagerId, plateNumber, vehicleType, vehicleModel, vehicleYear, capacity, 
-       driverName, driverPhone, driverLicense, vehicleReg, status, driverId, createdAt)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+       driverName, driverPhone, driverLicense, vehicleReg, status, driverId,
+       product, description, type, color, imageUrl, notes, createdAt)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
     `
     
     const [result] = await pool.execute(query, [
@@ -46,7 +53,13 @@ export const createTruck = async (truckData) => {
       driverLicense || null,
       vehicleReg || null,
       status,
-      driverId || null
+      driverId || null,
+      product || null,
+      description || null,
+      type || null,
+      color || null,
+      imageUrl || null,
+      notes || null
     ])
     
     truckIds.push(result.insertId)
@@ -112,14 +125,22 @@ export const updateTruck = async (truckId, fleetManagerId, truckData) => {
     driverLicense,
     vehicleReg,
     status,
-    driverId
+    driverId,
+    product,
+    description,
+    type,
+    color,
+    imageUrl,
+    notes
   } = truckData
 
   const query = `
     UPDATE trucks 
     SET plateNumber = ?, vehicleType = ?, vehicleModel = ?, vehicleYear = ?, 
         capacity = ?, driverName = ?, driverPhone = ?, driverLicense = ?, 
-        vehicleReg = ?, status = ?, driverId = ?, updatedAt = NOW()
+        vehicleReg = ?, status = ?, driverId = ?,
+        product = ?, description = ?, type = ?, color = ?, imageUrl = ?, notes = ?,
+        updatedAt = NOW()
     WHERE id = ? AND fleetManagerId = ?
   `
   
@@ -135,6 +156,12 @@ export const updateTruck = async (truckId, fleetManagerId, truckData) => {
     vehicleReg || null,
     status || 'active',
     driverId !== undefined ? driverId : null,
+    product !== undefined ? product : null,
+    description !== undefined ? description : null,
+    type !== undefined ? type : null,
+    color !== undefined ? color : null,
+    imageUrl !== undefined ? imageUrl : null,
+    notes !== undefined ? notes : null,
     truckId,
     fleetManagerId
   ])

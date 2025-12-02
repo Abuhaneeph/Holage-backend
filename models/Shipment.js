@@ -1,6 +1,25 @@
 import pool from "../config/db.js"
 
 /**
+ * Helper function to clean shipment data - filter out "00" and "0" from LGA fields
+ */
+const cleanShipmentData = (shipment) => {
+  if (!shipment) return shipment
+  
+  const cleaned = { ...shipment }
+  
+  // Filter out "00" and "0" from LGA fields - set to null
+  if (cleaned.pickupLga === '00' || cleaned.pickupLga === '0' || cleaned.pickupLga === '') {
+    cleaned.pickupLga = null
+  }
+  if (cleaned.destinationLga === '00' || cleaned.destinationLga === '0' || cleaned.destinationLga === '') {
+    cleaned.destinationLga = null
+  }
+  
+  return cleaned
+}
+
+/**
  * Create a new shipment
  */
 export const createShipment = async (shipmentData) => {
@@ -60,7 +79,7 @@ export const getShipmentById = async (shipmentId) => {
     WHERE s.id = ?
   `
   const [rows] = await pool.execute(query, [shipmentId])
-  return rows[0]
+  return rows[0] ? cleanShipmentData(rows[0]) : null
 }
 
 /**
@@ -78,7 +97,7 @@ export const getShipmentsByShipperId = async (shipperId, limit = 20, offset = 0)
     LIMIT ${limitInt} OFFSET ${offsetInt}
   `
   const [rows] = await pool.execute(query, [shipperId])
-  return rows
+  return rows.map(cleanShipmentData)
 }
 
 /**
@@ -114,10 +133,24 @@ export const getAvailableShipments = async (limit = 20, offset = 0, filters = {}
     params.push(filters.truckType)
   }
   
+  if (filters.cargoType) {
+    query += ` AND s.cargoType = ?`
+    params.push(filters.cargoType)
+  }
+  
+  if (filters.weight) {
+    // Filter by weight (allow approximate matches, e.g., within 0.5 tons)
+    const weightValue = parseFloat(filters.weight)
+    if (!isNaN(weightValue)) {
+      query += ` AND ABS(s.weight - ?) <= 0.5`
+      params.push(weightValue)
+    }
+  }
+  
   query += ` ORDER BY s.createdAt DESC LIMIT ${limitInt} OFFSET ${offsetInt}`
   
   const [rows] = await pool.execute(query, params)
-  return rows
+  return rows.map(cleanShipmentData)
 }
 
 /**
@@ -137,7 +170,7 @@ export const getShipmentsByTruckerId = async (truckerId, limit = 20, offset = 0)
     LIMIT ${limitInt} OFFSET ${offsetInt}
   `
   const [rows] = await pool.execute(query, [truckerId])
-  return rows
+  return rows.map(cleanShipmentData)
 }
 
 /**
@@ -163,6 +196,32 @@ export const updateShipmentStatus = async (shipmentId, status) => {
     WHERE id = ?
   `
   const [result] = await pool.execute(query, [status, shipmentId])
+  return result.affectedRows > 0
+}
+
+/**
+ * Confirm pickup by shipper
+ */
+export const confirmPickup = async (shipmentId) => {
+  const query = `
+    UPDATE shipments 
+    SET pickupConfirmed = 1, pickupConfirmedAt = NOW(), updatedAt = NOW()
+    WHERE id = ? AND pickupConfirmed = 0
+  `
+  const [result] = await pool.execute(query, [shipmentId])
+  return result.affectedRows > 0
+}
+
+/**
+ * Confirm delivery by shipper
+ */
+export const confirmDelivery = async (shipmentId) => {
+  const query = `
+    UPDATE shipments 
+    SET deliveryConfirmed = 1, deliveryConfirmedAt = NOW(), updatedAt = NOW()
+    WHERE id = ? AND deliveryConfirmed = 0
+  `
+  const [result] = await pool.execute(query, [shipmentId])
   return result.affectedRows > 0
 }
 

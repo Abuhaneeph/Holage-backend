@@ -7,8 +7,61 @@ import {
   checkPhoneNumberExists,
   verifyDriverPassword
 } from "../models/Driver.js"
+import { createTruck } from "../models/Truck.js"
 import { findUserById } from "../models/User.js"
 import jwt from "jsonwebtoken"
+import multer from "multer"
+import { v2 as cloudinary } from "cloudinary"
+
+// Configure Cloudinary
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+})
+
+// Multer memory storage configuration for Cloudinary
+const storage = multer.memoryStorage()
+
+const upload = multer({
+  storage: storage,
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
+  fileFilter: (req, file, cb) => {
+    const filetypes = /jpeg|jpg|png|webp/
+    const mimetype = filetypes.test(file.mimetype)
+    const extname = filetypes.test(file.originalname.split('.').pop().toLowerCase())
+
+    if (mimetype && extname) {
+      return cb(null, true)
+    }
+    cb(new Error("Error: File upload only supports images (jpeg, jpg, png, webp)!"))
+  },
+}).single('truckImage')
+
+// Helper function to upload file to Cloudinary
+const uploadToCloudinary = (buffer, originalname, folder = 'Holage/trucks') => {
+  return new Promise((resolve, reject) => {
+    const uploadOptions = {
+      folder: folder,
+      public_id: `${folder.replace('/', '-')}-${Date.now()}-${originalname.split('.')[0]}`,
+      resource_type: 'image',
+    }
+
+    cloudinary.uploader.upload_stream(
+      uploadOptions,
+      (error, result) => {
+        if (error) {
+          reject(error)
+        } else {
+          resolve({
+            url: result.secure_url,
+            public_id: result.public_id
+          })
+        }
+      }
+    ).end(buffer)
+  })
+}
 
 /**
  * Register a new driver (Fleet Manager only)
@@ -338,5 +391,201 @@ export const driverLogin = async (req, res) => {
     console.error("Driver login error:", error)
     res.status(500).json({ message: "Server error during login" })
   }
+}
+
+/**
+ * Register driver and truck together (Fleet Manager only)
+ * This is a combined flow where fleet manager can register a driver and truck in one go
+ */
+export const registerDriverWithTruck = async (req, res) => {
+  const userId = req.user.id
+    
+    try {
+      const user = await findUserById(userId)
+      if (!user) {
+        return res.status(404).json({ message: "User not found" })
+      }
+
+      if (user.role !== "fleet_manager") {
+        return res.status(403).json({ message: "Only fleet managers can register drivers and trucks" })
+      }
+
+      // Parse fields from form data (multer makes them available in req.body)
+      const {
+        driverId, // If provided, use existing driver; otherwise create new
+        driverName,
+        phoneNumber,
+        driverLicense,
+        password,
+        // Truck fields
+        plateNumber,
+        vehicleType,
+        product,
+        description,
+        type,
+        color,
+        notes,
+        vehicleModel,
+        vehicleYear,
+        capacity,
+        vehicleReg,
+        status = 'active'
+      } = req.body
+
+      // Debug: log received data
+      console.log('Received form data:', {
+        driverId,
+        driverName,
+        phoneNumber,
+        plateNumber,
+        vehicleType,
+        hasFile: !!req.file
+      })
+
+      let finalDriverId = driverId
+
+      // If driverId is provided, verify it belongs to this fleet manager
+      if (driverId) {
+        const existingDriver = await getDriverById(driverId)
+        if (!existingDriver || existingDriver.fleetManagerId !== userId) {
+          return res.status(403).json({ message: "Driver not found or does not belong to you" })
+        }
+        finalDriverId = driverId
+      } else {
+        // Create new driver
+        if (!driverName || !phoneNumber || !driverLicense || !password) {
+          return res.status(400).json({ 
+            message: "driverName, phoneNumber, driverLicense, and password are required for new driver" 
+          })
+        }
+
+        // Check if phone number already exists
+        const phoneExists = await checkPhoneNumberExists(phoneNumber)
+        if (phoneExists) {
+          return res.status(409).json({ 
+            message: "Driver with this phone number already exists" 
+          })
+        }
+
+        // Validate password length
+        if (password.length < 6) {
+          return res.status(400).json({ 
+            message: "Password must be at least 6 characters long" 
+          })
+        }
+
+        finalDriverId = await createDriver({
+          fleetManagerId: userId,
+          driverName,
+          phoneNumber,
+          driverLicense,
+          password
+        })
+      }
+
+      // Validate truck fields
+      if (!plateNumber || !vehicleType) {
+        return res.status(400).json({ 
+          message: "plateNumber and vehicleType are required" 
+        })
+      }
+
+      // Check if plate number already exists
+      const { checkPlateNumberExists } = await import("../models/Truck.js")
+      const plateExists = await checkPlateNumberExists(plateNumber, userId)
+      if (plateExists) {
+        return res.status(409).json({ 
+          message: "A truck with this plate number already exists in your fleet" 
+        })
+      }
+
+      // Upload truck image if provided
+      let imageUrl = null
+      if (req.file) {
+        try {
+          const uploadResult = await uploadToCloudinary(
+            req.file.buffer,
+            req.file.originalname,
+            'Holage/trucks'
+          )
+          imageUrl = uploadResult.url
+        } catch (uploadError) {
+          console.error("Error uploading truck image:", uploadError)
+          return res.status(500).json({ 
+            message: "Failed to upload truck image",
+            error: uploadError.message 
+          })
+        }
+      }
+
+      // Create truck
+      const truckId = await createTruck({
+        fleetManagerId: userId,
+        plateNumber,
+        vehicleType,
+        vehicleModel: vehicleModel || null,
+        vehicleYear: vehicleYear ? parseInt(vehicleYear) : null,
+        capacity: capacity ? parseFloat(capacity) : null,
+        vehicleReg: vehicleReg || null,
+        status,
+        driverId: finalDriverId,
+        product: product || null,
+        description: description || null,
+        type: type || null,
+        color: color || null,
+        imageUrl: imageUrl,
+        notes: notes || null
+      })
+
+      // Get created truck and driver
+      const { getTruckById } = await import("../models/Truck.js")
+      const truck = await getTruckById(truckId)
+      const driver = await getDriverById(finalDriverId)
+
+      res.status(201).json({
+        success: true,
+        message: "Driver and truck registered successfully",
+        driver: {
+          id: driver.id,
+          driverName: driver.driverName,
+          phoneNumber: driver.phoneNumber,
+          driverLicense: driver.driverLicense,
+          isActive: driver.isActive
+        },
+        truck: {
+          id: truck.id,
+          plateNumber: truck.plateNumber,
+          vehicleType: truck.vehicleType,
+          product: truck.product,
+          description: truck.description,
+          type: truck.type,
+          color: truck.color,
+          imageUrl: truck.imageUrl,
+          notes: truck.notes
+        }
+      })
+
+    } catch (error) {
+      console.error("Error registering driver with truck:", error)
+      res.status(500).json({ 
+        message: "Server error registering driver and truck", 
+        error: error.message 
+      })
+    }
+}
+
+// Middleware for handling file uploads (optional file)
+export const uploadTruckImage = (req, res, next) => {
+  upload(req, res, (err) => {
+    // If error is about missing file field, ignore it (file is optional)
+    if (err && err.code === 'LIMIT_UNEXPECTED_FILE') {
+      return next()
+    }
+    // For other multer errors, pass them along
+    if (err) {
+      return next(err)
+    }
+    next()
+  })
 }
 

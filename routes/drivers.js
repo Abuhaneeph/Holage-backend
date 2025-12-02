@@ -5,7 +5,9 @@ import {
   getDriver,
   updateDriverById,
   deleteDriverById,
-  driverLogin
+  driverLogin,
+  registerDriverWithTruck,
+  uploadTruckImage
 } from '../controllers/driverController.js';
 import { protect } from '../middleware/auth.js';
 
@@ -17,6 +19,13 @@ const router = express.Router();
  * @access  Public
  */
 router.post('/login', driverLogin);
+
+/**
+ * @route   POST /api/drivers/register-with-truck
+ * @desc    Register a driver and truck together (Fleet Manager only)
+ * @access  Private (Fleet Manager only)
+ */
+router.post('/register-with-truck', protect, uploadTruckImage, registerDriverWithTruck);
 
 /**
  * @route   POST /api/drivers

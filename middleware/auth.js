@@ -39,6 +39,19 @@ export const protect = async (req, res, next) => {
       
       next()
     } catch (error) {
+      // Handle specific JWT errors
+      if (error.name === 'TokenExpiredError') {
+        return res.status(401).json({ 
+          message: "Token expired. Please login again.",
+          expired: true 
+        })
+      }
+      if (error.name === 'JsonWebTokenError') {
+        return res.status(401).json({ 
+          message: "Invalid token. Please login again." 
+        })
+      }
+      // Only log unexpected errors
       console.error("Auth middleware error:", error)
       res.status(401).json({ message: "Not authorized, token failed" })
     }

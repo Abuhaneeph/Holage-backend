@@ -9,7 +9,9 @@ import {
   getShipmentDetails,
   acceptShipment,
   updateShipment,
-  deleteShipmentById
+  deleteShipmentById,
+  confirmPickupByShipper,
+  confirmDeliveryByShipper
 } from '../controllers/shipmentController.js';
 import { protect } from '../middleware/auth.js';
 
@@ -217,6 +219,20 @@ router.patch('/shipments/:shipmentId', protect, updateShipment);
  * @access  Private (Shipper only)
  */
 router.delete('/shipments/:shipmentId', protect, deleteShipmentById);
+
+/**
+ * @route   POST /api/shipping/shipments/:shipmentId/confirm-pickup
+ * @desc    Confirm pickup by shipper (releases 60% payment)
+ * @access  Private (Shipper only)
+ */
+router.post('/shipments/:shipmentId/confirm-pickup', protect, confirmPickupByShipper);
+
+/**
+ * @route   POST /api/shipping/shipments/:shipmentId/confirm-delivery
+ * @desc    Confirm delivery by shipper (releases remaining 35% payment)
+ * @access  Private (Shipper only)
+ */
+router.post('/shipments/:shipmentId/confirm-delivery', protect, confirmDeliveryByShipper);
 
 export default router;
 

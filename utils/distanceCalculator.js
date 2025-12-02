@@ -391,7 +391,21 @@ async function calculateStateDistance(pickupState, destinationState, pickupLga =
     )
     
     distance = osrmResult.distance
-    const durationMinutes = osrmResult.duration
+    let durationMinutes = osrmResult.duration
+    
+    // Add buffer time for short trips (OSRM doesn't account for loading/unloading, traffic delays)
+    if (distance < 20) {
+      durationMinutes += 30 // Add 30 minutes for very short trips
+    } else if (distance < 50) {
+      durationMinutes += 20 // Add 20 minutes for short trips
+    } else if (distance < 100) {
+      durationMinutes += 15 // Add 15 minutes for medium-short trips
+    } else {
+      durationMinutes += 10 // Add 10 minutes buffer for longer trips
+    }
+    
+    // Round up to nearest 5 minutes for realistic estimates
+    durationMinutes = Math.ceil(durationMinutes / 5) * 5
     
     // Format duration
     if (durationMinutes < 60) {
@@ -423,18 +437,55 @@ async function calculateStateDistance(pickupState, destinationState, pickupLga =
       destinationInfo.lng,
     )
 
-    const averageSpeed = 60
-    const durationHours = Math.ceil(distance / averageSpeed)
+    // Use more realistic average speeds based on distance
+    // Short trips (< 50km) are often in cities with traffic: 30-40 km/h
+    // Medium trips (50-200km): 50 km/h
+    // Long trips (> 200km): 60 km/h
+    let averageSpeed
+    if (distance < 50) {
+      averageSpeed = 35 // City traffic for short trips
+    } else if (distance < 200) {
+      averageSpeed = 50 // Mixed roads
+    } else {
+      averageSpeed = 55 // Highway speeds (slightly lower than 60 for realism)
+    }
+    
+    // Calculate base duration
+    let durationHours = distance / averageSpeed
+    
+    // Add buffer time for short trips (loading/unloading, traffic, etc.)
+    if (distance < 20) {
+      durationHours += 0.5 // Add 30 minutes for very short trips
+    } else if (distance < 50) {
+      durationHours += 0.25 // Add 15 minutes for short trips
+    } else if (distance < 100) {
+      durationHours += 0.15 // Add ~9 minutes for medium-short trips
+    }
+    
+    // Round up to nearest 0.25 hours (15 minutes) for realistic estimates
+    durationHours = Math.ceil(durationHours * 4) / 4
 
     if (durationHours < 1) {
-      estimatedDuration = 'Less than 1 hour'
+      const minutes = Math.round(durationHours * 60)
+      estimatedDuration = `${minutes} ${minutes === 1 ? 'minute' : 'minutes'}`
     } else if (durationHours === 1) {
       estimatedDuration = '1 hour'
     } else if (durationHours < 24) {
-      estimatedDuration = `${durationHours} hours`
+      const hours = Math.floor(durationHours)
+      const minutes = Math.round((durationHours - hours) * 60)
+      if (minutes === 0) {
+        estimatedDuration = `${hours} ${hours === 1 ? 'hour' : 'hours'}`
+      } else {
+        estimatedDuration = `${hours} ${hours === 1 ? 'hour' : 'hours'} ${minutes} ${minutes === 1 ? 'minute' : 'minutes'}`
+      }
     } else {
-      const days = Math.ceil(durationHours / 24)
-      estimatedDuration = `${days} ${days === 1 ? 'day' : 'days'}`
+      const days = Math.floor(durationHours / 24)
+      const remainingHours = Math.round((durationHours % 24))
+      if (remainingHours === 0) {
+        estimatedDuration = `${days} ${days === 1 ? 'day' : 'days'}`
+      } else {
+        estimatedDuration = `${days} ${days === 1 ? 'day' : 'days'} ${remainingHours} ${remainingHours === 1 ? 'hour' : 'hours'}`
+      }
     }
   }
 
@@ -510,8 +561,31 @@ function estimateShippingCost(distance, weight = 1, options = {}) {
   const tonnageRatePerKm = getTonnageRate(weight)
   const tonnageCost = weight * distance * tonnageRatePerKm
   
+  // Calculate base cost before minimum check
+  let baseCost = dieselCost + tonnageCost + baseFee
+  
+  // Apply minimum pricing for short trips to ensure fair pricing
+  // Short trips have higher per-km costs due to fixed overheads
+  let minimumCost
+  if (distance < 10) {
+    // Very short trips (< 10km): Minimum ₦25,000
+    minimumCost = 25000
+  } else if (distance < 25) {
+    // Short trips (10-25km): Minimum ₦30,000
+    minimumCost = 30000
+  } else if (distance < 50) {
+    // Medium-short trips (25-50km): Minimum ₦35,000
+    minimumCost = 35000
+  } else {
+    // Longer trips: Use calculated cost
+    minimumCost = 0
+  }
+  
+  // Use the higher of calculated cost or minimum cost
+  const adjustedBaseCost = minimumCost > 0 ? Math.max(baseCost, minimumCost) : baseCost
+  
   // Calculate total cost
-  const totalCost = dieselCost + tonnageCost + baseFee + fragileFee + insuranceFee
+  const totalCost = adjustedBaseCost + fragileFee + insuranceFee
   
   return {
     distance: distance,
@@ -523,6 +597,8 @@ function estimateShippingCost(distance, weight = 1, options = {}) {
     tonnageRatePerKm: tonnageRatePerKm,
     tonnageCost: Math.round(tonnageCost),
     baseFee: baseFee,
+    minimumCost: minimumCost || 0,
+    adjustedBaseCost: adjustedBaseCost,
     fragileFee: fragileFee,
     insuranceFee: insuranceFee,
     totalCost: Math.round(totalCost),

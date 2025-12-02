@@ -93,6 +93,8 @@ export const getBidsByTruckerId = async (truckerId) => {
            s.pickupDate,
            s.estimatedCost as shipmentEstimatedCost,
            s.status as shipmentStatus,
+           s.pickupConfirmed,
+           s.deliveryConfirmed,
            u.fullName as shipperName
     FROM shipment_bids b
     LEFT JOIN shipments s ON b.shipmentId = s.id
@@ -122,6 +124,8 @@ export const getBidsByDriverId = async (driverId) => {
            s.estimatedCost as shipmentEstimatedCost,
            s.status as shipmentStatus,
            s.shipperId,
+           s.pickupConfirmed,
+           s.deliveryConfirmed,
            u.fullName as shipperName,
            u.phone as shipperPhone,
            fm.fullName as fleetManagerName,
@@ -153,6 +157,8 @@ export const getBidsByFleetManagerId = async (fleetManagerId) => {
            s.pickupDate,
            s.estimatedCost as shipmentEstimatedCost,
            s.status as shipmentStatus,
+           s.pickupConfirmed,
+           s.deliveryConfirmed,
            u.fullName as shipperName,
            u.phone as shipperPhone,
            d.driverName,

@@ -15,6 +15,7 @@ import {
 import { getShipmentById, assignTruckerToShipment } from "../models/Shipment.js"
 import { findUserById, createWalletTransaction, getWalletBalance } from "../models/User.js"
 import { getDriverById } from "../models/Driver.js"
+import { notifyBidAccepted, notifyNewBid } from "../utils/notificationService.js"
 import axios from "axios"
 
 /**
@@ -129,6 +130,14 @@ export const submitBid = async (req, res) => {
     })
 
     const bid = await getBidById(bidId)
+
+    // Send notification to shipper about new bid
+    try {
+      await notifyNewBid(shipment.shipperId, bid, shipment)
+    } catch (notifError) {
+      console.error("Error sending new bid notification:", notifError)
+      // Don't fail the request if notification fails
+    }
 
     res.status(201).json({
       success: true,
@@ -397,6 +406,17 @@ export const acceptBidForShipment = async (req, res) => {
 
     const updatedBid = await getBidById(bidId)
     const updatedShipment = await getShipmentById(bid.shipmentId)
+
+    // Send notification to bid recipient
+    try {
+      const recipientId = bid.fleetManagerId || bid.truckerId
+      if (recipientId) {
+        await notifyBidAccepted(updatedBid, updatedShipment, recipientId)
+      }
+    } catch (notifError) {
+      console.error("Error sending bid acceptance notification:", notifError)
+      // Don't fail the request if notification fails
+    }
 
     let successMessage = "Bid accepted successfully. 5% payment (pickup cost) has been credited to the trucker's wallet balance. 60% will be credited upon pickup, and 35% upon completion."
     
