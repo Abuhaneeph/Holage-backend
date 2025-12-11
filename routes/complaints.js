@@ -8,6 +8,7 @@ import {
   getMyComplaints,
   addComplaintMessage,
   getComplaintMessages,
+  getComplaintStats,
 } from "../controllers/complaintController.js"
 
 const router = express.Router()
@@ -27,6 +28,9 @@ router.get("/:complaintId/messages", authenticate, getComplaintMessages)
 // Admin-only routes
 router.use(authenticate)
 router.use(authorizeRoles("admin"))
+
+// Get complaint statistics (admin only)
+router.get("/stats", getComplaintStats)
 
 // Get all complaints (admin only)
 router.get("/", getAllComplaints)

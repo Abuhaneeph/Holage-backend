@@ -11,9 +11,11 @@ import {
   deleteShipment
 } from "../models/Shipment.js"
 import { findUserById, getWalletBalance, createWalletTransaction } from "../models/User.js"
-import { getAcceptedBidByShipmentId } from "../models/Bid.js"
+import { getAcceptedBidByShipmentId, getBidsByShipmentId } from "../models/Bid.js"
 import { getDriverById } from "../models/Driver.js"
 import { notifyShipmentStatusChange, notifyPayment } from "../utils/notificationService.js"
+import { getPODsByShipmentId } from "../models/POD.js"
+import { getNotificationsByUserId } from "../models/Notification.js"
 import pool from "../config/db.js"
 import axios from "axios"
 import { calculateStateDistance, estimateShippingCost, slugify } from "../utils/distanceCalculator.js"
@@ -25,14 +27,28 @@ export const createNewShipment = async (req, res) => {
   const userId = req.user.id
   
   try {
-    const user = await findUserById(userId)
-    if (!user) {
-      return res.status(404).json({ message: "User not found" })
+    // Use req.user.role directly (already set by auth middleware)
+    // Make comparison case-insensitive and handle whitespace
+    const userRole = req.user.role ? String(req.user.role).trim().toLowerCase() : null
+    
+    // Debug logging to help identify the issue
+    console.log("Shipment creation - User ID:", userId, "Role:", userRole, "Raw role:", req.user.role)
+    
+    if (!userRole) {
+      console.error("User role is missing for user:", userId)
+      return res.status(403).json({ message: "User role not found. Please contact support." })
     }
 
     // Only shippers can create shipments
-    if (user.role !== "shipper") {
+    if (userRole !== "shipper") {
+      console.error("Access denied - User role:", userRole, "Expected: shipper")
       return res.status(403).json({ message: "Only shippers can create shipments" })
+    }
+    
+    // Fetch user for other operations (wallet balance, etc.)
+    const user = await findUserById(userId)
+    if (!user) {
+      return res.status(404).json({ message: "User not found" })
     }
 
     const {
@@ -222,13 +238,17 @@ export const getMyShipments = async (req, res) => {
   const userId = req.user.id
   
   try {
+    // Use req.user.role directly (already set by auth middleware)
+    const userRole = req.user.role ? String(req.user.role).trim().toLowerCase() : null
+    
+    if (!userRole || userRole !== "shipper") {
+      return res.status(403).json({ message: "Only shippers can access this endpoint" })
+    }
+    
+    // Fetch user for other operations if needed
     const user = await findUserById(userId)
     if (!user) {
       return res.status(404).json({ message: "User not found" })
-    }
-
-    if (user.role !== "shipper") {
-      return res.status(403).json({ message: "Only shippers can access this endpoint" })
     }
 
     const limit = parseInt(req.query.limit) || 20
@@ -765,13 +785,16 @@ export const deleteShipmentById = async (req, res) => {
   const { shipmentId } = req.params
   
   try {
+    // Use req.user.role directly (already set by auth middleware)
+    const userRole = req.user.role ? String(req.user.role).trim().toLowerCase() : null
+    
+    if (!userRole || userRole !== "shipper") {
+      return res.status(403).json({ message: "Only shippers can delete shipments" })
+    }
+    
     const user = await findUserById(userId)
     if (!user) {
       return res.status(404).json({ message: "User not found" })
-    }
-
-    if (user.role !== "shipper") {
-      return res.status(403).json({ message: "Only shippers can delete shipments" })
     }
 
     const success = await deleteShipment(shipmentId, userId)
@@ -804,13 +827,16 @@ export const confirmPickupByShipper = async (req, res) => {
   const { shipmentId } = req.params
   
   try {
+    // Use req.user.role directly (already set by auth middleware)
+    const userRole = req.user.role ? String(req.user.role).trim().toLowerCase() : null
+    
+    if (!userRole || userRole !== "shipper") {
+      return res.status(403).json({ message: "Only shippers can confirm pickup" })
+    }
+    
     const user = await findUserById(userId)
     if (!user) {
       return res.status(404).json({ message: "User not found" })
-    }
-
-    if (user.role !== "shipper") {
-      return res.status(403).json({ message: "Only shippers can confirm pickup" })
     }
 
     const shipment = await getShipmentById(shipmentId)
@@ -898,13 +924,16 @@ export const confirmDeliveryByShipper = async (req, res) => {
   const { shipmentId } = req.params
   
   try {
+    // Use req.user.role directly (already set by auth middleware)
+    const userRole = req.user.role ? String(req.user.role).trim().toLowerCase() : null
+    
+    if (!userRole || userRole !== "shipper") {
+      return res.status(403).json({ message: "Only shippers can confirm delivery" })
+    }
+    
     const user = await findUserById(userId)
     if (!user) {
       return res.status(404).json({ message: "User not found" })
-    }
-
-    if (user.role !== "shipper") {
-      return res.status(403).json({ message: "Only shippers can confirm delivery" })
     }
 
     const shipment = await getShipmentById(shipmentId)
@@ -982,6 +1011,382 @@ export const confirmDeliveryByShipper = async (req, res) => {
     console.error("Error confirming delivery:", error)
     res.status(500).json({ 
       message: "Server error confirming delivery", 
+      error: error.message 
+    })
+  }
+}
+
+/**
+ * Get shipment journey transcript (Admin only)
+ * Returns complete timeline of shipment events including:
+ * - Shipment creation
+ * - All bids placed
+ * - Status changes
+ * - POD documents
+ * - Payment transactions
+ * - Pickup/delivery confirmations
+ * - Notifications sent
+ */
+export const getShipmentJourneyTranscript = async (req, res) => {
+  const { shipmentId } = req.params
+  
+  try {
+    // Check if user is admin
+    const userRole = req.user.role ? String(req.user.role).trim().toLowerCase() : null
+    if (!userRole || userRole !== "admin") {
+      return res.status(403).json({ message: "Only admins can access shipment transcripts" })
+    }
+
+    // Get shipment details
+    const shipment = await getShipmentById(shipmentId)
+    if (!shipment) {
+      return res.status(404).json({ message: "Shipment not found" })
+    }
+
+    // Get all bids for this shipment
+    const bids = await getBidsByShipmentId(shipmentId)
+
+    // Get POD documents
+    const pods = await getPODsByShipmentId(shipmentId)
+
+    // Get accepted bid (needed for driver info and timeline)
+    const acceptedBid = await getAcceptedBidByShipmentId(shipmentId)
+
+    // Get wallet transactions related to this shipment
+    // Try multiple patterns to catch all variations
+    const [walletTransactions] = await pool.execute(
+      `SELECT * FROM wallet_transactions 
+       WHERE (metadata LIKE ? OR metadata LIKE ? OR metadata LIKE ? OR description LIKE ?)
+       ORDER BY createdAt ASC`,
+      [
+        `%"shipmentId":${shipmentId}%`,
+        `%"shipmentId":"${shipmentId}"%`,
+        `%"shipmentId": "${shipmentId}"%`,
+        `%shipment #${shipmentId}%`
+      ]
+    )
+
+    // Parse metadata for wallet transactions
+    const parsedTransactions = walletTransactions.map(tx => {
+      let metadata = null
+      if (tx.metadata) {
+        try {
+          metadata = typeof tx.metadata === 'string' ? JSON.parse(tx.metadata) : tx.metadata
+        } catch (e) {
+          console.error('Error parsing transaction metadata:', e)
+        }
+      }
+      return { ...tx, metadata }
+    })
+
+    // Debug logging
+    console.log(`📊 Shipment #${shipmentId} - Found ${walletTransactions.length} wallet transactions`)
+    console.log(`📊 Parsed transactions:`, parsedTransactions.map(tx => ({
+      id: tx.id,
+      type: tx.type,
+      amount: tx.amount,
+      status: tx.status,
+      description: tx.description,
+      hasMetadata: !!tx.metadata,
+      shipmentIdInMetadata: tx.metadata?.shipmentId
+    })))
+
+    // Get notifications related to this shipment
+    // Query notifications table directly for better performance
+    const [notificationRows] = await pool.execute(
+      `SELECT * FROM notifications 
+       WHERE (relatedId = ? AND relatedType = 'shipment') 
+          OR (metadata LIKE ? AND category = 'shipment')
+          OR (message LIKE ? AND category = 'shipment')
+       ORDER BY createdAt ASC`,
+      [shipmentId, `%"shipmentId":${shipmentId}%`, `%#${shipmentId}%`]
+    )
+
+    // Parse metadata for notifications
+    const allNotifications = notificationRows.map(notif => {
+      let metadata = null
+      if (notif.metadata) {
+        try {
+          metadata = typeof notif.metadata === 'string' ? JSON.parse(notif.metadata) : notif.metadata
+        } catch (e) {
+          console.error('Error parsing notification metadata:', e)
+        }
+      }
+      return { ...notif, metadata }
+    })
+
+    // Build timeline events
+    const timeline = []
+
+    // 1. Shipment Creation
+    timeline.push({
+      event: 'shipment_created',
+      timestamp: shipment.createdAt,
+      description: `Shipment #${shipmentId} created by ${shipment.shipperName || 'Shipper'}`,
+      details: {
+        pickupLocation: `${shipment.pickupLga || ''}, ${shipment.pickupState}`,
+        destinationLocation: `${shipment.destinationLga || ''}, ${shipment.destinationState}`,
+        cargoType: shipment.cargoType,
+        weight: shipment.weight,
+        truckType: shipment.truckType,
+        estimatedCost: shipment.estimatedCost,
+        distance: shipment.distance,
+        fragileItems: shipment.fragileItems ? 'Yes' : 'No',
+        insurance: shipment.insurance ? 'Yes' : 'No'
+      }
+    })
+
+    // 2. Bids placed
+    bids.forEach(bid => {
+      timeline.push({
+        event: bid.status === 'accepted' ? 'bid_accepted' : 'bid_placed',
+        timestamp: bid.status === 'accepted' ? (bid.acceptedAt || bid.updatedAt) : bid.createdAt,
+        description: bid.status === 'accepted' 
+          ? `Bid accepted: ₦${parseFloat(bid.bidAmount).toLocaleString()} by ${bid.truckerName || bid.fleetManagerName || 'Trucker'}`
+          : `Bid placed: ₦${parseFloat(bid.bidAmount).toLocaleString()} by ${bid.truckerName || bid.fleetManagerName || 'Trucker'}`,
+        details: {
+          bidId: bid.id,
+          bidAmount: bid.bidAmount,
+          bidder: bid.truckerName || bid.fleetManagerName || 'Unknown',
+          driver: bid.driverName || null,
+          message: bid.message || null,
+          status: bid.status
+        }
+      })
+    })
+
+    // 3. Shipment assignment
+    if (shipment.truckerId && shipment.assignedAt) {
+      const trucker = await findUserById(shipment.truckerId)
+      timeline.push({
+        event: 'shipment_assigned',
+        timestamp: shipment.assignedAt,
+        description: `Shipment assigned to ${trucker?.fullName || 'Trucker'}`,
+        details: {
+          truckerId: shipment.truckerId,
+          truckerName: trucker?.fullName || 'Unknown',
+          status: shipment.status
+        }
+      })
+    }
+
+    // 4. Status changes (inferred from shipment data and notifications)
+    const statusHistory = []
+    if (shipment.status !== 'pending') {
+      statusHistory.push({
+        status: shipment.status,
+        timestamp: shipment.updatedAt || shipment.createdAt
+      })
+    }
+
+    // 5. POD documents
+    pods.forEach(pod => {
+      timeline.push({
+        event: `pod_${pod.podType}`,
+        timestamp: pod.createdAt,
+        description: `${pod.podType === 'pickup' ? 'Pickup' : 'Delivery'} POD uploaded`,
+        details: {
+          podId: pod.id,
+          podType: pod.podType,
+          hasPhotos: pod.photos && pod.photos.length > 0,
+          hasSignature: !!pod.signatureData,
+          signatureName: pod.signatureName,
+          signaturePhone: pod.signaturePhone,
+          location: pod.address || (pod.latitude && pod.longitude ? `${pod.latitude}, ${pod.longitude}` : null),
+          notes: pod.notes
+        }
+      })
+    })
+
+    // 6. Pickup confirmation
+    if (shipment.pickupConfirmed && shipment.pickupConfirmedAt) {
+      timeline.push({
+        event: 'pickup_confirmed',
+        timestamp: shipment.pickupConfirmedAt,
+        description: 'Shipper confirmed pickup - 60% payment released',
+        details: {
+          confirmedBy: shipment.shipperName || 'Shipper'
+        }
+      })
+    }
+
+    // 7. Delivery confirmation
+    if (shipment.deliveryConfirmed && shipment.deliveryConfirmedAt) {
+      timeline.push({
+        event: 'delivery_confirmed',
+        timestamp: shipment.deliveryConfirmedAt,
+        description: 'Shipper confirmed delivery - 35% payment released',
+        details: {
+          confirmedBy: shipment.shipperName || 'Shipper'
+        }
+      })
+    }
+
+    // 8. Payment transactions
+    parsedTransactions.forEach(tx => {
+      const paymentStage = tx.metadata?.paymentStage || 'initial'
+      const amount = typeof tx.amount === 'string' ? parseFloat(tx.amount) : (tx.amount || 0)
+      const formattedAmount = isNaN(amount) ? '0' : amount.toLocaleString()
+      timeline.push({
+        event: tx.type === 'credit' ? 'payment_credited' : 'payment_debited',
+        timestamp: tx.createdAt,
+        description: `${tx.type === 'credit' ? 'Payment credited' : 'Payment debited'}: ₦${formattedAmount}`,
+        details: {
+          transactionId: tx.id,
+          amount: amount,
+          type: tx.type,
+          status: tx.status,
+          description: tx.description,
+          reference: tx.reference,
+          paymentStage: paymentStage,
+          percentage: tx.metadata?.percentage || null
+        }
+      })
+    })
+
+    // 9. Notifications (add to timeline)
+    allNotifications.forEach(notif => {
+      timeline.push({
+        event: 'notification_sent',
+        timestamp: notif.createdAt,
+        description: `Notification: ${notif.title}`,
+        details: {
+          notificationId: notif.id,
+          title: notif.title,
+          message: notif.message,
+          type: notif.type,
+          recipient: notif.userId
+        }
+      })
+    })
+
+    // Sort timeline by timestamp
+    timeline.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp))
+
+    // Get related users info
+    const shipper = await findUserById(shipment.shipperId)
+    let trucker = null
+    if (shipment.truckerId) {
+      trucker = await findUserById(shipment.truckerId)
+    }
+
+    res.status(200).json({
+      success: true,
+      shipment: {
+        id: shipment.id,
+        shipper: {
+          id: shipment.shipperId,
+          name: shipment.shipperName,
+          email: shipment.shipperEmail,
+          phone: shipment.shipperPhone
+        },
+        trucker: trucker ? {
+          id: trucker.id,
+          name: trucker.fullName,
+          email: trucker.email,
+          phone: trucker.phone
+        } : null,
+        pickupLocation: {
+          state: shipment.pickupState,
+          lga: shipment.pickupLga
+        },
+        destinationLocation: {
+          state: shipment.destinationState,
+          lga: shipment.destinationLga
+        },
+        cargoDetails: {
+          type: shipment.cargoType,
+          weight: shipment.weight,
+          truckType: shipment.truckType,
+          fragileItems: shipment.fragileItems,
+          insurance: shipment.insurance
+        },
+        costDetails: {
+          estimatedCost: shipment.estimatedCost,
+          distance: shipment.distance,
+          estimatedDuration: shipment.estimatedDuration
+        },
+        status: shipment.status,
+        pickupConfirmed: shipment.pickupConfirmed,
+        deliveryConfirmed: shipment.deliveryConfirmed,
+        createdAt: shipment.createdAt,
+        updatedAt: shipment.updatedAt
+      },
+      acceptedBid: acceptedBid ? {
+        id: acceptedBid.id,
+        bidAmount: acceptedBid.bidAmount,
+        trucker: acceptedBid.truckerName,
+        driver: acceptedBid.driverName,
+        fleetManager: acceptedBid.fleetManagerName,
+        message: acceptedBid.message
+      } : null,
+      allBids: bids.map(bid => ({
+        id: bid.id,
+        bidAmount: bid.bidAmount,
+        bidder: bid.truckerName || bid.fleetManagerName,
+        driver: bid.driverName,
+        status: bid.status,
+        message: bid.message,
+        createdAt: bid.createdAt,
+        acceptedAt: bid.acceptedAt
+      })),
+      podDocuments: pods.map(pod => ({
+        id: pod.id,
+        type: pod.podType,
+        photos: pod.photos || [], // Include actual photo URLs/paths
+        hasPhotos: pod.photos && pod.photos.length > 0,
+        photoCount: pod.photos ? pod.photos.length : 0,
+        hasSignature: !!pod.signatureData,
+        signatureData: pod.signatureData, // Include signature data
+        signatureName: pod.signatureName,
+        signaturePhone: pod.signaturePhone,
+        notes: pod.notes,
+        latitude: pod.latitude,
+        longitude: pod.longitude,
+        address: pod.address,
+        location: pod.address || (pod.latitude && pod.longitude ? `${pod.latitude}, ${pod.longitude}` : null),
+        createdAt: pod.createdAt,
+        updatedAt: pod.updatedAt
+      })),
+      paymentTransactions: parsedTransactions.map(tx => ({
+        id: tx.id,
+        type: tx.type,
+        amount: tx.amount,
+        status: tx.status,
+        description: tx.description,
+        reference: tx.reference,
+        paymentStage: tx.metadata?.paymentStage,
+        percentage: tx.metadata?.percentage,
+        createdAt: tx.createdAt
+      })),
+      timeline: timeline,
+      summary: {
+        totalBids: bids.length,
+        acceptedBid: acceptedBid ? 'Yes' : 'No',
+        podDocumentsCount: pods.length,
+        paymentTransactionsCount: parsedTransactions.length,
+        totalCredited: parsedTransactions
+          .filter(tx => tx.type === 'credit' && (tx.status === 'success' || tx.status === 1))
+          .reduce((sum, tx) => {
+            const amount = typeof tx.amount === 'string' ? parseFloat(tx.amount) : (tx.amount || 0)
+            return sum + (isNaN(amount) ? 0 : amount)
+          }, 0),
+        totalDebited: parsedTransactions
+          .filter(tx => tx.type === 'debit' && (tx.status === 'success' || tx.status === 1))
+          .reduce((sum, tx) => {
+            const amount = typeof tx.amount === 'string' ? parseFloat(tx.amount) : (tx.amount || 0)
+            return sum + (isNaN(amount) ? 0 : amount)
+          }, 0),
+        currentStatus: shipment.status,
+        pickupConfirmed: shipment.pickupConfirmed ? 'Yes' : 'No',
+        deliveryConfirmed: shipment.deliveryConfirmed ? 'Yes' : 'No'
+      }
+    })
+
+  } catch (error) {
+    console.error("Error fetching shipment journey transcript:", error)
+    res.status(500).json({ 
+      message: "Server error fetching shipment transcript", 
       error: error.message 
     })
   }

@@ -6,7 +6,7 @@ import pool from "../config/db.js"
 export const submitComplaint = async (req, res) => {
   try {
     const userId = req.user.id
-    const { subject, message } = req.body
+    const { subject, message, shipmentId } = req.body
 
     if (!subject || !message) {
       return res.status(400).json({ message: "Subject and message are required." })
@@ -24,11 +24,30 @@ export const submitComplaint = async (req, res) => {
 
     const user = userRows[0]
 
+    // If shipmentId is provided, validate it exists and user has access
+    if (shipmentId) {
+      const [shipmentRows] = await pool.execute(
+        "SELECT shipperId, truckerId FROM shipments WHERE id = ?",
+        [shipmentId]
+      )
+
+      if (shipmentRows.length === 0) {
+        return res.status(404).json({ message: "Shipment not found." })
+      }
+
+      const shipment = shipmentRows[0]
+      
+      // Check if user is the shipper or trucker of this shipment
+      if (shipment.shipperId !== userId && shipment.truckerId !== userId && user.role !== "admin") {
+        return res.status(403).json({ message: "You can only file complaints for shipments you are involved in." })
+      }
+    }
+
     // Insert complaint
     const [result] = await pool.execute(
-      `INSERT INTO complaints (userId, userEmail, userName, userRole, subject, message, status)
-       VALUES (?, ?, ?, ?, ?, ?, 'pending')`,
-      [userId, user.email, user.fullName, user.role, subject, message]
+      `INSERT INTO complaints (userId, shipmentId, userEmail, userName, userRole, subject, message, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')`,
+      [userId, shipmentId || null, user.email, user.fullName, user.role, subject, message]
     )
 
     res.status(201).json({
@@ -55,9 +74,17 @@ export const getAllComplaints = async (req, res) => {
     let query = `
       SELECT 
         c.*,
-        u.fullName as resolvedByName
+        u.fullName as resolvedByName,
+        s.id as shipmentId,
+        s.pickupState,
+        s.pickupLga,
+        s.destinationState,
+        s.destinationLga,
+        s.status as shipmentStatus,
+        s.createdAt as shipmentCreatedAt
       FROM complaints c
       LEFT JOIN users u ON c.resolvedBy = u.id
+      LEFT JOIN shipments s ON c.shipmentId = s.id
       WHERE 1=1
     `
     const params = []
@@ -113,9 +140,17 @@ export const getComplaintById = async (req, res) => {
     const [complaints] = await pool.execute(
       `SELECT 
         c.*,
-        u.fullName as resolvedByName
+        u.fullName as resolvedByName,
+        s.id as shipmentId,
+        s.pickupState,
+        s.pickupLga,
+        s.destinationState,
+        s.destinationLga,
+        s.status as shipmentStatus,
+        s.createdAt as shipmentCreatedAt
       FROM complaints c
       LEFT JOIN users u ON c.resolvedBy = u.id
+      LEFT JOIN shipments s ON c.shipmentId = s.id
       WHERE c.id = ?`,
       [complaintId]
     )
@@ -313,6 +348,36 @@ export const getComplaintMessages = async (req, res) => {
 }
 
 /**
+ * Get complaint statistics (admin only)
+ */
+export const getComplaintStats = async (req, res) => {
+  try {
+    const [stats] = await pool.execute(
+      `SELECT 
+        COUNT(*) as total,
+        SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending,
+        SUM(CASE WHEN status = 'in_progress' THEN 1 ELSE 0 END) as in_progress,
+        SUM(CASE WHEN status = 'resolved' THEN 1 ELSE 0 END) as resolved,
+        SUM(CASE WHEN status = 'closed' THEN 1 ELSE 0 END) as closed
+      FROM complaints`
+    )
+
+    res.status(200).json({
+      success: true,
+      stats: {
+        total: stats[0]?.total || 0,
+        pending: stats[0]?.pending || 0,
+        in_progress: stats[0]?.in_progress || 0,
+        resolved: (stats[0]?.resolved || 0) + (stats[0]?.closed || 0),
+      },
+    })
+  } catch (error) {
+    console.error("Error fetching complaint stats:", error)
+    res.status(500).json({ message: "Server error while fetching complaint stats." })
+  }
+}
+
+/**
  * Get user's own complaints with messages
  */
 export const getMyComplaints = async (req, res) => {
@@ -322,9 +387,17 @@ export const getMyComplaints = async (req, res) => {
     const [complaints] = await pool.execute(
       `SELECT 
         c.*,
-        u.fullName as resolvedByName
+        u.fullName as resolvedByName,
+        s.id as shipmentId,
+        s.pickupState,
+        s.pickupLga,
+        s.destinationState,
+        s.destinationLga,
+        s.status as shipmentStatus,
+        s.createdAt as shipmentCreatedAt
       FROM complaints c
       LEFT JOIN users u ON c.resolvedBy = u.id
+      LEFT JOIN shipments s ON c.shipmentId = s.id
       WHERE c.userId = ?
       ORDER BY c.createdAt DESC`,
       [userId]

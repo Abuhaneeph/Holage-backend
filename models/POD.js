@@ -71,6 +71,37 @@ export const createOrUpdatePOD = async (podData) => {
 }
 
 /**
+ * Helper function to safely parse photos field
+ */
+const parsePhotos = (photos) => {
+  if (!photos) return []
+  
+  // If it's already an array/object, return as is
+  if (Array.isArray(photos)) return photos
+  if (typeof photos === 'object') return photos
+  
+  // If it's a string, try to parse as JSON
+  if (typeof photos === 'string') {
+    // Check if it looks like a file path (starts with /)
+    if (photos.startsWith('/') || photos.startsWith('http')) {
+      // It's a single file path, return as array
+      return [photos]
+    }
+    
+    // Try to parse as JSON
+    try {
+      const parsed = JSON.parse(photos)
+      return Array.isArray(parsed) ? parsed : [parsed]
+    } catch (e) {
+      // If parsing fails, treat as single file path
+      return [photos]
+    }
+  }
+  
+  return []
+}
+
+/**
  * Get POD by shipment ID and type
  */
 export const getPODByShipmentAndType = async (shipmentId, podType) => {
@@ -85,7 +116,7 @@ export const getPODByShipmentAndType = async (shipmentId, podType) => {
   const row = rows[0]
   return {
     ...row,
-    photos: row.photos ? JSON.parse(row.photos) : []
+    photos: parsePhotos(row.photos)
   }
 }
 
@@ -102,7 +133,7 @@ export const getPODsByShipmentId = async (shipmentId) => {
   
   return rows.map(row => ({
     ...row,
-    photos: row.photos ? JSON.parse(row.photos) : []
+    photos: parsePhotos(row.photos)
   }))
 }
 
@@ -120,7 +151,7 @@ export const getPODsByUserId = async (userId, limit = 50, offset = 0) => {
   
   return rows.map(row => ({
     ...row,
-    photos: row.photos ? JSON.parse(row.photos) : []
+    photos: parsePhotos(row.photos)
   }))
 }
 

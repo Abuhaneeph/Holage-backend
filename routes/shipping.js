@@ -11,9 +11,10 @@ import {
   updateShipment,
   deleteShipmentById,
   confirmPickupByShipper,
-  confirmDeliveryByShipper
+  confirmDeliveryByShipper,
+  getShipmentJourneyTranscript
 } from '../controllers/shipmentController.js';
-import { protect } from '../middleware/auth.js';
+import { protect, authorizeRoles } from '../middleware/auth.js';
 
 const router = express.Router();
 
@@ -233,6 +234,13 @@ router.post('/shipments/:shipmentId/confirm-pickup', protect, confirmPickupByShi
  * @access  Private (Shipper only)
  */
 router.post('/shipments/:shipmentId/confirm-delivery', protect, confirmDeliveryByShipper);
+
+/**
+ * @route   GET /api/shipping/shipments/:shipmentId/transcript
+ * @desc    Get complete shipment journey transcript (Admin only)
+ * @access  Private (Admin only)
+ */
+router.get('/shipments/:shipmentId/transcript', protect, authorizeRoles('admin'), getShipmentJourneyTranscript);
 
 export default router;
 
